@@ -1,0 +1,5 @@
+auditoria-*.tar.gz
+auditoria-*/
+reportes/
+*.log
+.DS_Store
