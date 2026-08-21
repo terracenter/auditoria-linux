@@ -5,6 +5,17 @@
 # Basado en la plantilla: Obsidian/Planes/_templates/auditoria-host-linux.md
 # Marcos: CIS Controls v8, CIS Ubuntu 22.04 Benchmark v2.0.0, NIST SP 800-53.
 # Tooling: herramientas estándar + Lynis (audit system --quick).
+# Estándar operativo: Obsidian/03_Manuales_Borradores/Seguridad/Manual/
+#
+# Fases:
+#   0 — Checklist operacional (10 validaciones críticas, aborta si no hay firewall)
+#   1 — Inventario y postura general
+#   2 — Acceso y autenticación (sshd, sudoers, PAM)
+#   3 — Red y firewall (ufw/nft/iptables, sysctl, DNS)
+#   4 — Logs, monitoreo y tiempo
+#   5 — Actualizaciones y paquetes
+#   6 — Backups del host
+#   7 — Lynis (herramienta externa)
 #
 # Uso:
 #   sudo ./auditoria-host-linux.sh [OPCIONES]
@@ -270,6 +281,313 @@ Cliente: ${CLIENTE}
 
 EOF
 }
+
+# ============================================================================
+# FASE 0 — Checklist operacional (10 validaciones críticas)
+# ============================================================================
+# Esta fase corre ANTES de las 7 fases de auditoría. Valida que el host
+# cumple con el estándar mínimo de seguridad definido en:
+#   Obsidian/03_Manuales_Borradores/Seguridad/Manual/
+#   (Firewall, Whitelist, GeoIP, Fail2ban, SSH Hardening, Anti-Recon,
+#    Hardening Root, Verificación Integral)
+#
+# Política:
+#   - Sin firewall (cualquiera)         → ABORTAR (exit 3)
+#   - Backend iptables-legacy           → WARN urgente (nftables es lo correcto)
+#   - BLOQUE 2 anti-recon ausente        → WARN URGENTE
+#   - Fail2ban ausente                   → WARN URGENTE
+#   - infra-whitelist vacío              → WARN URGENTE
+#   - GeoIP allowlist vacío              → WARN URGENTE
+#   - Zabbix agent ausente               → WARN URGENTE
+#   - Bare metal vs VPS                  → INFO
+#   - Registro GLPI                      → INFO (placeholder, el operador
+#                                                 documenta manualmente)
+#   - Docker + iptables-legacy           → INFO (problema conocido, ver
+#                                                 Obsidian/Planes/_templates/
+#                                                 auditoria-host-linux.md §9)
+
+section "FASE 0 — Checklist operacional (10 validaciones críticas)"
+write_phase_header "fase-00-checklist" "Checklist operacional de seguridad"
+
+CHECKLIST_TXT="${OUT_DIR}/fase-00-checklist-operacional.md"
+CHECKLIST_RESULT="${OUT_DIR}/fase-00-checklist-resultados.md"
+
+# Inicializar archivo de resultados
+CHECKLIST_SUMMARY="check_id|estado|categoria|descripcion\n"
+declare -A CHECKLIST_STATUS
+
+# Helper para registrar resultado
+chk() {
+  local id="$1"; local estado="$2"; local cat="$3"; local desc="$4"
+  CHECKLIST_STATUS["$id"]="$estado"
+  CHECKLIST_SUMMARY+="${id}|${estado}|${cat}|${desc}\n"
+}
+
+# ---- Check #1: Bare metal vs VPS (INFO) ----
+VIRT="$(systemd-detect-virt 2>/dev/null || echo unknown)"
+{
+  echo "## Check #1 — Bare metal vs VPS"; echo
+  echo "\`\`\`bash"
+  echo "\$ systemd-detect-virt"; systemd-detect-virt 2>&1 || true
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${VIRT}" = "none" ]; then
+  chk "C1-BAREMETAL" "OK" "INFO" "Host bare-metal (systemd-detect-virt=none)"
+elif [ "${VIRT}" = "kvm" ] || [ "${VIRT}" = "qemu" ] || [ "${VIRT}" = "vmware" ]; then
+  chk "C1-BAREMETAL" "WARN" "INFO" "Host es VM (systemd-detect-virt=${VIRT})"
+else
+  chk "C1-BAREMETAL" "WARN" "INFO" "Tipo de virtualización desconocido (${VIRT})"
+fi
+
+# ---- Check #2: Firewall activo (CRÍTICO - aborta si falta) ----
+FW_PRESENTE=0
+FW_BACKEND="ninguno"
+{
+  echo "## Check #2 — Firewall activo"; echo
+  echo "\`\`\`bash"
+  if command -v ufw >/dev/null 2>&1; then
+    echo "\$ ufw status verbose"; ufw status verbose 2>&1
+    if ufw status 2>&1 | grep -q "Status: active"; then
+      FW_PRESENTE=1
+      FW_BACKEND="ufw"
+    fi
+  fi
+  if [ "${FW_PRESENTE}" -eq 0 ] && command -v nft >/dev/null 2>&1; then
+    echo "\$ nft list ruleset | head -10"; nft list ruleset 2>&1 | head -10
+    if nft list ruleset 2>/dev/null | grep -q "table inet"; then
+      FW_PRESENTE=1
+      FW_BACKEND="nftables"
+    fi
+  fi
+  if [ "${FW_PRESENTE}" -eq 0 ]; then
+    echo "\$ iptables -S | head -10"; iptables -S 2>&1 | head -10
+    if iptables -S 2>/dev/null | grep -qE '^-A|-P'; then
+      FW_PRESENTE=1
+      FW_BACKEND="iptables"
+    fi
+  fi
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${FW_PRESENTE}" -eq 1 ]; then
+  chk "C2-FIREWALL" "OK" "CRITICO" "Firewall activo (backend=${FW_BACKEND})"
+else
+  chk "C2-FIREWALL" "FATAL" "CRITICO" "Sin firewall — URGENTE instalar antes de continuar"
+  cat >> "${CHECKLIST_RESULT}" <<EOF
+| C2-FIREWALL | **FATAL** | CRITICO | Sin firewall — instalar UFW/nftables antes de continuar |
+
+> **El script ABORTÓ en Check #2. El host NO tiene firewall activo (ni UFW, ni nftables,
+> ni iptables con reglas).** Esto es crítico — sin firewall el host está completamente
+> expuesto a internet. Instalar \`ufw\` (\`apt install ufw\`) o configurar nftables y volver
+> a ejecutar la auditoría. Referencia: Manual 01.Firewall.md en
+> \`Obsidian/03_Manuales_Borradores/Seguridad/Manual/\`.
+EOF
+  err "ABORTANDO — sin firewall activo. Instalar UFW antes de continuar."
+  exit 3
+fi
+
+# ---- Check #3: Backend del firewall (nft vs legacy iptables) ----
+FW_NFTABLES=0
+lsmod_output="$(lsmod 2>/dev/null | grep -E '^nf_tables|^ip_tables|^iptable_nat|^iptable_filter' || true)"
+{
+  echo "## Check #3 — Backend del firewall (nftables vs iptables-legacy)"; echo
+  echo "\`\`\`bash"
+  echo "\$ lsmod | grep -E 'nf_tables|ip_tables|iptable_'"; echo "${lsmod_output}"
+  echo "\$ ls -la /sbin/iptables /sbin/ip6tables /sbin/arptables /sbin/ebtables 2>/dev/null"
+  ls -la /sbin/iptables /sbin/ip6tables /sbin/arptables /sbin/ebtables 2>/dev/null || true
+  echo "\$ update-alternatives --display iptables 2>&1 | head"
+  update-alternatives --display iptables 2>&1 | head -10 || true
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if echo "${lsmod_output}" | grep -q "^nf_tables "; then
+  FW_NFTABLES=1
+fi
+if [ "${FW_NFTABLES}" -eq 1 ]; then
+  chk "C3-FWBACKEND" "OK" "WARN" "Firewall usa backend nftables (correcto)"
+else
+  chk "C3-FWBACKEND" "WARN" "WARN" "Firewall parece usar iptables-legacy (no nftables). Migrar a nftables si es posible"
+fi
+
+# ---- Check #4: BLOQUE 2 anti-reconocimiento aplicado (URGENTE) ----
+ANTIRECON_COUNT=0
+ANTIRECON_COUNT=$(grep -c "ANTIRECON" /etc/ufw/before.rules 2>/dev/null || echo 0)
+{
+  echo "## Check #4 — BLOQUE 2 anti-reconocimiento"; echo
+  echo "\`\`\`bash"
+  echo "\$ grep -c ANTIRECON /etc/ufw/before.rules"
+  echo "${ANTIRECON_COUNT}"
+  echo "\$ grep -A1 'ANTIRECON' /etc/ufw/before.rules 2>/dev/null | head -16"
+  grep -A1 "ANTIRECON" /etc/ufw/before.rules 2>/dev/null | head -16 || true
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${ANTIRECON_COUNT}" -ge 8 ]; then
+  chk "C4-ANTIRECON" "OK" "URGENTE" "BLOQUE 2 anti-recon aplicado (${ANTIRECON_COUNT} reglas)"
+else
+  chk "C4-ANTIRECON" "WARN" "URGENTE" "BLOQUE 2 anti-recon AUSENTE (${ANTIRECON_COUNT} reglas encontradas, esperado ≥8). Aplicar Manual 01.Firewall.md §BLOQUE 2"
+fi
+
+# ---- Check #5: fail2ban instalado (URGENTE) ----
+F2B_INSTALLED=0
+F2B_ACTIVE=0
+if command -v fail2ban-client >/dev/null 2>&1; then
+  F2B_INSTALLED=1
+  if systemctl is-active fail2ban 2>/dev/null | grep -q active; then
+    F2B_ACTIVE=1
+  fi
+fi
+{
+  echo "## Check #5 — Fail2ban instalado y activo"; echo
+  echo "\`\`\`bash"
+  echo "\$ command -v fail2ban-client"
+  command -v fail2ban-client 2>&1 || echo "(no instalado)"
+  echo "\$ systemctl is-active fail2ban"
+  systemctl is-active fail2ban 2>&1 || true
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${F2B_INSTALLED}" -eq 1 ] && [ "${F2B_ACTIVE}" -eq 1 ]; then
+  chk "C5-FAIL2BAN" "OK" "URGENTE" "fail2ban instalado y activo"
+elif [ "${F2B_INSTALLED}" -eq 1 ]; then
+  chk "C5-FAIL2BAN" "WARN" "URGENTE" "fail2ban instalado pero INACTIVO. Activar con 'systemctl enable --now fail2ban'"
+else
+  chk "C5-FAIL2BAN" "WARN" "URGENTE" "fail2ban NO instalado. Aplicar Manual 04.Fail2ban.md (apt install fail2ban)"
+fi
+
+# ---- Check #6: Whitelist corporativa infra-whitelist con contenido (URGENTE) ----
+INFRA_WL_COUNT=0
+INFRA_WL_CONTENT=""
+if command -v ipset >/dev/null 2>&1; then
+  INFRA_WL_CONTENT="$(ipset list infra-whitelist 2>/dev/null | grep -cE '^[0-9]' || true)"
+  INFRA_WL_COUNT="${INFRA_WL_CONTENT}"
+fi
+{
+  echo "## Check #6 — Whitelist corporativa infra-whitelist"; echo
+  echo "\`\`\`bash"
+  echo "\$ ipset list infra-whitelist 2>&1"
+  ipset list infra-whitelist 2>&1 | head -30 || true
+  echo "\$ wc -l /etc/ipset/infra-whitelist.txt 2>/dev/null"
+  wc -l /etc/ipset/infra-whitelist.txt 2>/dev/null || echo "(no existe SSoT)"
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${INFRA_WL_COUNT}" -ge 1 ]; then
+  chk "C6-WHITELIST" "OK" "URGENTE" "infra-whitelist con ${INFRA_WL_COUNT} entradas"
+else
+  chk "C6-WHITELIST" "WARN" "URGENTE" "infra-whitelist VACÍA o inexistente. Agregar IPs de gestión (Manual 02.infra-whitelist.md)"
+fi
+
+# ---- Check #7: GeoIP allowlist con contenido (URGENTE) ----
+GEOIP_ALLOW_COUNT=0
+GEOIP_BLOCK_COUNT=0
+if command -v ipset >/dev/null 2>&1; then
+  GEOIP_ALLOW_COUNT="$(ipset list geoip-allow 2>/dev/null | grep -cE '^[0-9]' || true)"
+  GEOIP_BLOCK_COUNT="$(ipset list geoip-block 2>/dev/null | grep -cE '^[0-9]' || true)"
+fi
+{
+  echo "## Check #7 — GeoIP allowlist / blocklist"; echo
+  echo "\`\`\`bash"
+  echo "\$ ipset list geoip-allow 2>&1 | head -20"
+  ipset list geoip-allow 2>&1 | head -20 || true
+  echo
+  echo "\$ ipset list geoip-block 2>&1 | head -20"
+  ipset list geoip-block 2>&1 | head -20 || true
+  echo "\$ /etc/ipset/geoip-allow.countries 2>/dev/null"
+  cat /etc/ipset/geoip-allow.countries 2>/dev/null || echo "(no existe SSoT)"
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${GEOIP_ALLOW_COUNT}" -ge 1 ]; then
+  chk "C7-GEOIP" "OK" "URGENTE" "GeoIP allowlist con ${GEOIP_ALLOW_COUNT} entradas (blocklist: ${GEOIP_BLOCK_COUNT})"
+else
+  chk "C7-GEOIP" "WARN" "URGENTE" "GeoIP allowlist VACÍA. Configurar países permitidos (Manual 03.geoip-ipset.md)"
+fi
+
+# ---- Check #8: Zabbix agent (URGENTE si ausente) ----
+ZABBIX_OK=0
+ZABBIX_ACTIVE=0
+if command -v zabbix_agent2 >/dev/null 2>&1 || command -v zabbix_agentd >/dev/null 2>&1; then
+  ZABBIX_OK=1
+  if systemctl is-active zabbix-agent2 2>/dev/null | grep -q active \
+     || systemctl is-active zabbix-agent 2>/dev/null | grep -q active; then
+    ZABBIX_ACTIVE=1
+  fi
+fi
+{
+  echo "## Check #8 — Zabbix agent"; echo
+  echo "\`\`\`bash"
+  echo "\$ command -v zabbix_agent2 || command -v zabbix_agentd"
+  command -v zabbix_agent2 2>&1 || command -v zabbix_agentd 2>&1 || echo "(no instalado)"
+  echo "\$ systemctl is-active zabbix-agent2 || systemctl is-active zabbix-agent"
+  systemctl is-active zabbix-agent2 2>&1 || systemctl is-active zabbix-agent 2>&1 || true
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${ZABBIX_OK}" -eq 1 ] && [ "${ZABBIX_ACTIVE}" -eq 1 ]; then
+  chk "C8-ZABBIX" "OK" "URGENTE" "Zabbix agent instalado y activo"
+elif [ "${ZABBIX_OK}" -eq 1 ]; then
+  chk "C8-ZABBIX" "WARN" "URGENTE" "Zabbix agent instalado pero INACTIVO"
+else
+  chk "C8-ZABBIX" "WARN" "URGENTE" "Zabbix agent NO instalado. Instalar y registrar en Zabbix server Fibex"
+fi
+
+# ---- Check #9: Registro en GLPI (INFO — placeholder, lo valida el operador) ----
+{
+  echo "## Check #9 — Registro en GLPI"; echo
+  echo
+  echo "> **El script NO valida GLPI automáticamente.** El operador debe verificar"
+  echo "> manualmente en la consola GLPI de Fibex que este host:"
+  echo
+  echo "> 1. Esté registrado como 'Computador' en la entidad 'Fibex'."
+  echo "> 2. Tenga asociado el cliente 'Fibex Telecom'."
+  echo "> 3. Tenga creado un ticket de auditoría (este informe, una vez aprobado)."
+  echo
+  echo "Path en el vault para registrar: \`Obsidian/02_Servidores/Fibex/\`"
+} >> "${CHECKLIST_TXT}"
+chk "C9-GLPI" "INFO" "INFO" "Validación manual — el operador verifica registro GLPI"
+
+# ---- Check #10: Docker + iptables-legacy (INFO) ----
+DOCKER_PRESENTE=0
+if command -v docker >/dev/null 2>&1; then
+  DOCKER_PRESENTE=1
+fi
+{
+  echo "## Check #10 — Compatibilidad Docker + nftables"; echo
+  echo "\`\`\`bash"
+  echo "\$ command -v docker"
+  command -v docker 2>&1 || echo "(no docker)"
+  if [ "${DOCKER_PRESENTE}" -eq 1 ]; then
+    echo "\$ docker version --format '{{.Server.Version}}' 2>/dev/null"
+    docker version --format '{{.Server.Version}}' 2>/dev/null || echo "(docker no responde)"
+    echo "\$ iptables -V"
+    iptables -V 2>&1 || true
+  fi
+  echo "\`\`\`"
+} >> "${CHECKLIST_TXT}"
+if [ "${DOCKER_PRESENTE}" -eq 1 ] && [ "${FW_NFTABLES}" -eq 1 ]; then
+  chk "C10-DOCKER-NFT" "WARN" "INFO" "Docker + nftables detectado. Problema conocido: Docker trabaja con iptables-legacy por defecto. Verificar iptables-nft compatibility. NOTA: pendiente documentar workaround (urgente para IPTV)."
+elif [ "${DOCKER_PRESENTE}" -eq 1 ]; then
+  chk "C10-DOCKER-NFT" "INFO" "INFO" "Docker detectado, firewall usa iptables-legacy (compatibilidad OK con Docker por ahora)"
+else
+  chk "C10-DOCKER-NFT" "OK" "INFO" "Sin Docker — no aplica este check"
+fi
+
+# ---- Generar tabla de resultados ----
+{
+  echo "# Resultados del Checklist Operacional (Fase 0)"
+  echo
+  echo "Generado: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo
+  echo "| Check | Estado | Categoría | Descripción |"
+  echo "|---|---|---|---|"
+  printf "${CHECKLIST_SUMMARY}" | \
+    awk -F'|' '{printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4}'
+} > "${CHECKLIST_RESULT}"
+
+# Mostrar resumen al operador
+cat "${CHECKLIST_RESULT}"
+
+# Si hubo algún FATAL ya abortamos arriba. Si hubo WARN URGENTE, marcamos en log.
+URGENTES=$(printf "${CHECKLIST_SUMMARY}" | grep -c "^C[0-9]|WARN|URGENTE" || true)
+if [ "${URGENTES}" -gt 0 ]; then
+  warn "Hay ${URGENTES} checks URGENTES pendientes. Ver resultados en fase-00-checklist-resultados.md"
+fi
+
+ok "Fase 0 (checklist operacional) completa."
 
 # ============================================================================
 # FASE 1 — Inventario y postura general
@@ -763,6 +1081,7 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 ## Estado de las fases
 | Fase | Archivo | Estado |
 |---|---|---|
+| 0 — Checklist operacional | \`fase-00-checklist-*.md\` | $([ -s "${OUT_DIR}/fase-00-checklist-resultados.md" ] && echo "OK" || echo "FALTA") |
 | 1 — Inventario | \`postura-general/\` | OK |
 | 2 — Acceso/auth | \`acceso-autenticacion/\` | OK |
 | 3 — Red/firewall | \`red-firewall/\` | OK |
@@ -770,6 +1089,9 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 | 5 — Updates | \`actualizaciones/\` | OK |
 | 6 — Backups | \`backups/\` | OK |
 | 7 — Lynis | \`lynis/\` | $([ "${LYNIS_OK}" -eq 1 ] && echo "OK" || echo "FALTA (no instalado)") |
+
+## Resumen del Checklist Operacional (Fase 0)
+$(cat "${OUT_DIR}/fase-00-checklist-resultados.md" 2>/dev/null || echo "(no generado)")
 
 ## Próximos pasos (humano)
 
