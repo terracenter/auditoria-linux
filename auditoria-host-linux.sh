@@ -21,13 +21,18 @@
 #   --sin-internet              Asume sin internet; aborta si falta herramienta.
 #   --no-tar                    No comprime al final (solo deja la carpeta).
 #   --tar                       Comprime al final (default).
+#   --keep-tree                 Después de empaquetar, conserva la carpeta cruda.
+#                               (default: la carpeta cruda se borra para no dejar basura).
+#   --no-cleanup                No limpia corridas anteriores con permisos root:root.
+#                               (default: las limpia al inicio).
 #   -y, --yes                   No pregunta nada interactivo, usa defaults.
 #
 # Comportamiento:
 #   - Read-only NUNCA modifica el sistema excepto instalar lynis si se puede.
 #   - Genera árbol de archivos en el dir de salida (default $HOME del usuario).
 #   - Por defecto comprime en .tar.gz al final para SCP/SFTP.
-#   - Con --no-tar deja la carpeta cruda (útil si vas a inspeccionar local).
+#   - Por defecto BORRA la carpeta cruda después de empaquetar (no deja basura).
+#   - Al inicio, limpia corridas anteriores que quedaron con permisos root:root.
 # ============================================================================
 
 set -u
@@ -44,7 +49,9 @@ SKIP_LYNIS=0
 NO_INSTALL=0
 SIN_INTERNET=0
 MAKE_TAR=1
+KEEP_TREE=0
 ASSUME_YES=0
+NO_CLEANUP=0
 OUT_DIR=""
 
 # Detectar el usuario que invocó el script (cuando se corre con sudo).
@@ -88,6 +95,8 @@ while [ $# -gt 0 ]; do
     --sin-internet) SIN_INTERNET=1; NO_INSTALL=1; shift ;;
     --no-tar) MAKE_TAR=0; shift ;;
     --tar) MAKE_TAR=1; shift ;;
+    --keep-tree) KEEP_TREE=1; shift ;;
+    --no-cleanup) NO_CLEANUP=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     *) err "Opción desconocida: $1"; usage ;;
   esac
@@ -111,6 +120,50 @@ OUT_BASE="$(dirname "${OUT_DIR}")"
 if [ "$(id -u)" -ne 0 ]; then
   err "Debe ejecutarse como root (sudo)."
   exit 2
+fi
+
+# ---------- Limpieza preventiva de corridas anteriores con root:root ----------
+# Bug histórico (versiones < d99634d): las carpetas quedaban como root:root
+# cuando el script corría bajo sudo. Esto bloqueaba al operador para hacer scp
+# sin escalar. Al inicio, si hay carpetas de auditorías previas del MISMO host
+# con owner root y NO son la corrida actual, las limpiamos para no acumular
+# basura que el usuario no puede inspeccionar.
+if [ "${NO_CLEANUP}" -eq 0 ] && [ -n "${INVOKER_USER}" ] && [ "${INVOKER_USER}" != "root" ]; then
+  HOST_PREFIX="${HOST_NOMBRE}"
+  HOME_BASE="${INVOKER_HOME}"
+  if [ -d "${HOME_BASE}" ]; then
+    # Buscar carpetas que coincidan con el patrón auditoria-<HOST>-*,
+    # excluyendo la corrida actual, que sean del usuario actual (suyas), o
+    # que estén como root:root (basura histórica del bug).
+    found_stale=0
+    while IFS= read -r -d '' stale_dir; do
+      [ -z "${stale_dir}" ] && continue
+      [ "${stale_dir}" = "${OUT_DIR}" ] && continue
+      owner="$(stat -c '%U' "${stale_dir}" 2>/dev/null)"
+      if [ "${owner}" = "root" ]; then
+        if [ -t 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+          printf "¿Borrar carpeta histórica con permisos root:root? [y/N] %s: " "${stale_dir}"
+          read -r REPLY </dev/tty 2>/dev/null || REPLY="n"
+        else
+          REPLY="y"
+        fi
+        case "${REPLY}" in
+          y|Y|yes|YES)
+            if rm -rf "${stale_dir}" 2>/dev/null; then
+              ok "Limpiada: ${stale_dir}"
+              found_stale=$((found_stale + 1))
+            else
+              warn "No se pudo borrar ${stale_dir}."
+            fi
+            ;;
+          *)
+            warn "Conservando: ${stale_dir}"
+            ;;
+        esac
+      fi
+    done < <(find "${HOME_BASE}" -maxdepth 1 -type d -name "auditoria-${HOST_PREFIX}-*" -print0 2>/dev/null)
+    [ "${found_stale}" -gt 0 ] && ok "Limpieza preventiva completada (${found_stale} carpeta(s))."
+  fi
 fi
 
 mkdir -p "${OUT_DIR}"/{logs,postura-general,acceso-autenticacion,red-firewall,logs-monitoreo,actualizaciones,backups,lynis,snapshots-config}
@@ -697,6 +750,7 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 | Fecha UTC | ${FECHA} ${HORA} |
 | Out dir | \`${OUT_DIR}\` |
 | Tarball | $([ "${MAKE_TAR}" -eq 1 ] && echo "\`${OUT_DIR}.tar.gz\`" || echo "(no generado, usar --no-tar)") |
+| Carpeta cruda | $([ "${KEEP_TREE}" -eq 1 ] && echo "\`${OUT_DIR}/\` (conservada)" || echo "(borrada — solo queda tarball)") |
 
 ## Inventario rápido
 - fail2ban:           $(_h2b fail2ban-client)
@@ -730,28 +784,44 @@ EOF
 # ============================================================================
 section "Empaquetando"
 
-TAR_PATH=""
-if [ "${MAKE_TAR}" -eq 1 ]; then
-  cd "${OUT_BASE}"
-  tar -czf "${OUT_DIR}.tar.gz" "$(basename "${OUT_DIR}")"
-  TAR_PATH="${OUT_DIR}.tar.gz"
-  TAR_SIZE=$(du -h "${TAR_PATH}" | awk '{print $1}')
-fi
-
 # ---------- Ajuste de permisos al usuario que invocó el script ----------
-# Si el script corrió bajo sudo (INVOKER_USER != root), transferimos ownership
-# del directorio y del tarball al usuario real para que pueda scp/editar sin
-# escalación adicional. Esto cubre los casos:
+# Se aplica ANTES del tar para que el tarball contenga los permisos del
+# usuario real, no de root. Si el script corrió bajo sudo (INVOKER_USER != root),
+# transferimos ownership del directorio y dejaremos el tarball bajo el usuario.
+# Casos:
 #   - sudo bash script.sh           -> INVOKER_USER = usuario original
 #   - sudo -u otro bash script.sh   -> INVOKER_USER = "otro"
 #   - bash script.sh (como root)    -> INVOKER_USER = root, no se cambia
 if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
   log "Ajustando ownership a ${INVOKER_USER}:${INVOKER_USER} para SCP sin escalación."
   if chown -R "${INVOKER_USER}:${INVOKER_USER}" "${OUT_DIR}" 2>/dev/null; then
-    [ -n "${TAR_PATH}" ] && chown "${INVOKER_USER}:${INVOKER_USER}" "${TAR_PATH}" 2>/dev/null || true
     ok "Ownership aplicado a ${OUT_DIR}"
   else
     warn "No se pudo aplicar chown a ${OUT_DIR} (¿filesystem readonly?). El reporte queda como root:root."
+  fi
+fi
+
+TAR_PATH=""
+if [ "${MAKE_TAR}" -eq 1 ]; then
+  cd "${OUT_BASE}"
+  tar -czf "${OUT_DIR}.tar.gz" "$(basename "${OUT_DIR}")" 2>/dev/null
+  TAR_PATH="${OUT_DIR}.tar.gz"
+  TAR_SIZE=$(du -h "${TAR_PATH}" | awk '{print $1}')
+  # Ajuste de permisos también al tarball (quedó como root porque tar corrió
+  # bajo sudo). Mismo user que OUT_DIR.
+  if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    chown "${INVOKER_USER}:${INVOKER_USER}" "${TAR_PATH}" 2>/dev/null || true
+  fi
+fi
+
+# ---------- Limpieza: borrar carpeta cruda por defecto ----------
+# Política: no dejar basura. Solo queda el .tar.gz (o la carpeta si --keep-tree).
+if [ "${KEEP_TREE}" -eq 0 ] && [ -n "${TAR_PATH}" ] && [ -d "${OUT_DIR}" ]; then
+  log "Borrando carpeta cruda (--keep-tree para conservar)."
+  if rm -rf "${OUT_DIR}" 2>/dev/null; then
+    ok "Carpeta cruda borrada. Solo queda el tarball."
+  else
+    warn "No se pudo borrar ${OUT_DIR}. El operador puede hacerlo manualmente."
   fi
 fi
 
@@ -759,10 +829,12 @@ ok "Listo."
 if [ -n "${TAR_PATH}" ]; then
   ok "📦 Reporte empaquetado en: ${TAR_PATH} (${TAR_SIZE})"
 fi
-ok "📁 Carpeta cruda: ${OUT_DIR}"
+if [ "${KEEP_TREE}" -eq 1 ] && [ -d "${OUT_DIR}" ]; then
+  ok "📁 Carpeta cruda (conservada por --keep-tree): ${OUT_DIR}"
+fi
 if [ -n "${TAR_PATH}" ]; then
   warn "Bajá con: scp ${INVOKER_USER}@${HOST_NOMBRE}:${TAR_PATH} /tmp/"
-else
+elif [ -d "${OUT_DIR}" ]; then
   warn "Bajá con: scp -r ${INVOKER_USER}@${HOST_NOMBRE}:${OUT_DIR}/ /tmp/"
 fi
 
