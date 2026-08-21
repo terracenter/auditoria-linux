@@ -590,11 +590,40 @@ OUT06="${OUT_DIR}/backups"
 } > "${OUT06}/cron-y-timers.md"
 
 {
-  echo "## Task 6.2 — Compliance legal Venezuela"; echo
+  echo "## Task 6.2 — Compliance legal"
+  echo
+  echo "> [!IMPORTANT] Alcance de esta sección"
+  echo "> Este script bash **NO** realiza análisis legal. Solo recolecta"
+  echo "> **evidencia** para que el operador (o el módulo \`internal/modules/audit/\`"
+  echo "> de Security-Manager-NG) la cruze con el marco regulatorio aplicable"
+  echo "> al país/jurisdicción donde opera el host y al tipo de data que maneja."
+  echo ">"
+  echo "> La auditoría bash es **el input**, no el análisis final."
+  echo ">"
+  echo "> El módulo SM-NG \`audit/\` SÍ debe ser parametrizable por país e"
+  echo "> industria (Venezuela: SUNACRIP/CONATEL/Ley Infogobierno; UE: GDPR;"
+  echo "> USA: SOX/HIPAA/CCPA; etc.). El script bash no implementa esto hoy."
+  echo
+  echo "### Compliance Venezuela (default — ajustar si el host está en otra jurisdicción)"
+  echo
   echo "- [ ] Política de backup firmada por gerencia."
   echo "- [ ] Procedimiento de notificación a SUNACRIP."
   echo "- [ ] Retención de logs críticos (definir según tipo de data)."
   echo "- [ ] Cadena de custodia ante incidente."
+  echo
+  echo "### Otros marcos (referencia)"
+  echo
+  echo "- **UE / EEE**: GDPR, NIS2, ISO 27001 (si aplica por industria)."
+  echo "- **USA**: HIPAA (salud), SOX (financiero), CCPA (privacidad)."
+  echo "- **LATAM**: Ley 1581/2012 Colombia, LGPD Brasil, etc."
+  echo "- **Telecomunicaciones** (Fibex/Conatel): RETIE, reglamentos sectoriales."
+  echo
+  echo "### Evidencia recolectada por este script (ver otras secciones)"
+  echo
+  echo "- Logs y monitoreo: \`logs-monitoreo/journald-rsyslog.md\` (Fase 4)"
+  echo "- Auditd: \`logs-monitoreo/auditd.md\` (Fase 4)"
+  echo "- Configuración de backups: \`backups/cron-y-timers.md\` (Fase 6)"
+  echo "- Usuarios y accesos: \`acceso-autenticacion/usuarios-grupos.md\` (Fase 1)"
 } > "${OUT06}/compliance-legal.md"
 
 ok "Fase 6 completa."
