@@ -60,4 +60,17 @@ scp usuario@host:~/auditoria-<hostname>-<fecha>-<hora>.tar.gz /tmp/
 
 ## Licencia
 
-Uso interno.
+GNU Affero General Public License v3.0 — ver [LICENSE](LICENSE).
+
+## Integración futura con Security-Manager-NG
+
+Este script bash es el **antecedente manual** del futuro módulo
+`internal/modules/audit/` de
+[Security-Manager-NG](https://github.com/terracenter/security-manager).
+Ver directiva en `Obsidian/Planes/Security-Manager-NG/` (en el vault de Freddy).
+
+## Créditos
+
+- Basado en CIS Ubuntu 22.04 Benchmark v2.0.0.
+- Lynis (CISOfy) — herramienta externa de auditoría.
+- Mantenido por Freddy Taborda <terracenter@gmail.com>.
