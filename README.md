@@ -28,9 +28,47 @@ ssh usuario@host
 sudo bash /tmp/auditoria-host-linux.sh
 
 # Resultado queda en $HOME del host:
-#   ~/auditoria-<hostname>-<YYYY-MM-DD>-<HHMMSSZ>/
 #   ~/auditoria-<hostname>-<YYYY-MM-DD>-<HHMMSSZ>.tar.gz
 ```
+
+## Procedimiento completo (laptop → le → vault)
+
+1. **Ejecutar en el host destino** (vía SSH desde la laptop que tiene acceso directo):
+
+   ```bash
+   ssh ftaborda@iptv-penta-rd
+   cd ~/auditoria-linux
+   git pull
+   sudo bash ~/auditoria-linux/auditoria-host-linux.sh -y
+   ls -lh ~/*.tar.gz
+   ```
+
+2. **Bajar el `.tar.gz` a la laptop**:
+
+   ```bash
+   rsync --progress -razuz "srv-iptv-penta-rd:~/audi*.tar.gz" /tmp/
+   ```
+
+3. **Subir el `.tar.gz` desde la laptop a `le`** (workspace Freddy, vía Tailscale):
+
+   ```bash
+   scp /tmp/auditoria-*.tar.gz le:/tmp/
+   ```
+
+4. **El agente (en hermes-contabo vía SSH a `le`) extrae, lee y borra sin dejar basura**:
+
+   ```bash
+   ssh le 'cd /tmp && tar -xzf auditoria-*.tar.gz && <analizar archivos>'
+   ssh le 'rm -rf /tmp/auditoria-*.tar.gz /tmp/auditoria-*/'
+   ```
+
+5. **El agente arma el informe en el vault**:
+
+   - Path: `02_Servidores/<Cliente>/<hostname>/auditoria-<YYYY-MM-DD>.md`
+   - Snapshots: `02_Servidores/<Cliente>/<hostname>/snapshots/<YYYY-MM-DD>/`
+   - Con SHA256 calculado por el script bash al inicio (ver `logs/snapshots.sha256`).
+
+6. **Cerrar con GLPI y correo al cliente** (responsable: Freddy).
 
 ## Opciones
 

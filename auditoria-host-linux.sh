@@ -772,11 +772,19 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 | 7 — Lynis | \`lynis/\` | $([ "${LYNIS_OK}" -eq 1 ] && echo "OK" || echo "FALTA (no instalado)") |
 
 ## Próximos pasos (humano)
-1. Bajar el tarball: \`${OUT_DIR}.tar.gz\` desde \`${HOME}/\`.
-2. Parsear cada archivo .md por fase.
-3. Comparar contra CIS Ubuntu 22.04 Benchmark v2.0.0.
-4. Armar tabla de hallazgos P0/P1/P2.
-5. Si Lynis falta: el operador debe revisarlo y decidir qué hallazgos cubre solo.
+
+1. **Bajar el tarball a la laptop** (rsync/scp):
+   \`\`\`
+   rsync --progress -razuz "${INVOKER_USER}@${HOST_NOMBRE}:~/*.tar.gz" /tmp/
+   \`\`\`
+2. **Subir a \`le\`** (workspace Freddy vía Tailscale) si la laptop no tiene acceso directo al vault:
+   \`\`\`
+   scp /tmp/auditoria-*.tar.gz le:/tmp/
+   \`\`\`
+3. **El agente (en hermes-contabo vía SSH a \`le\`) extrae, lee, y borra el tarball sin dejar basura**.
+4. **Comparar contra CIS Ubuntu 22.04 Benchmark v2.0.0**.
+5. **Armar tabla de hallazgos P0/P1/P2 + cara ejecutiva + cara técnica**.
+6. **Cerrar con GLPI y correo al cliente** (responsable: Freddy).
 EOF
 
 # ============================================================================
