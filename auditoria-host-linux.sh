@@ -313,31 +313,43 @@ CHECKLIST_TXT="${OUT_DIR}/fase-00-checklist-operacional.md"
 CHECKLIST_RESULT="${OUT_DIR}/fase-00-checklist-resultados.md"
 
 # Inicializar archivo de resultados
-CHECKLIST_SUMMARY="check_id|estado|categoria|descripcion\n"
+# Separador interno: \t (TAB) para evitar ambigüedad con pipes dentro de
+# la descripción del hallazgo.
+CHECKLIST_SUMMARY="check_id\testado\tcategoria\tdescripcion\n"
 declare -A CHECKLIST_STATUS
 
 # Helper para registrar resultado
 chk() {
   local id="$1"; local estado="$2"; local cat="$3"; local desc="$4"
   CHECKLIST_STATUS["$id"]="$estado"
-  CHECKLIST_SUMMARY+="${id}|${estado}|${cat}|${desc}\n"
+  CHECKLIST_SUMMARY+="${id}\t${estado}\t${cat}\t${desc}\n"
 }
 
 # ---- Check #1: Bare metal vs VPS (INFO) ----
-VIRT="$(systemd-detect-virt 2>/dev/null || echo unknown)"
+# Capturar via archivo temporal para evitar que la asignación se imprima
+# al log (exec > >(tee...) redirige TODO).
+TMPDIR_CHECK="${OUT_DIR}/logs"
+VIRT_FILE="${TMPDIR_CHECK}/virt.detect"
+{ systemd-detect-virt 2>/dev/null || echo unknown; } > "${VIRT_FILE}"
+VIRT="$(head -1 "${VIRT_FILE}" | tr -d '[:space:]')"
+[ -z "${VIRT}" ] && VIRT="unknown"
 {
   echo "## Check #1 — Bare metal vs VPS"; echo
   echo "\`\`\`bash"
   echo "\$ systemd-detect-virt"; systemd-detect-virt 2>&1 || true
   echo "\`\`\`"
 } >> "${CHECKLIST_TXT}"
-if [ "${VIRT}" = "none" ]; then
-  chk "C1-BAREMETAL" "OK" "INFO" "Host bare-metal (systemd-detect-virt=none)"
-elif [ "${VIRT}" = "kvm" ] || [ "${VIRT}" = "qemu" ] || [ "${VIRT}" = "vmware" ]; then
-  chk "C1-BAREMETAL" "WARN" "INFO" "Host es VM (systemd-detect-virt=${VIRT})"
-else
-  chk "C1-BAREMETAL" "WARN" "INFO" "Tipo de virtualización desconocido (${VIRT})"
-fi
+case "${VIRT}" in
+  none)
+    chk "C1-BAREMETAL" "OK" "INFO" "Host bare-metal (systemd-detect-virt=none)"
+    ;;
+  kvm|qemu|vmware|xen|microsoft|oracle|amazon)
+    chk "C1-BAREMETAL" "WARN" "INFO" "Host es VM (systemd-detect-virt=${VIRT})"
+    ;;
+  *)
+    chk "C1-BAREMETAL" "WARN" "INFO" "Tipo de virtualización desconocido (systemd-detect-virt='${VIRT}')"
+    ;;
+esac
 
 # ---- Check #2: Firewall activo (CRÍTICO - aborta si falta) ----
 FW_PRESENTE=0
@@ -408,8 +420,15 @@ else
 fi
 
 # ---- Check #4: BLOQUE 2 anti-reconocimiento aplicado (URGENTE) ----
-ANTIRECON_COUNT=0
-ANTIRECON_COUNT=$(grep -c "ANTIRECON" /etc/ufw/before.rules 2>/dev/null || echo 0)
+# Importante: como el script corre bajo exec > >(tee ...) que redirige TODO
+# al log, ANTIRECON_COUNT debe asignarse desde un archivo temporal para que
+# el output del grep -c no se imprima DOS veces (una por la asignación y
+# otra por el echo posterior).
+TMPDIR_CHECK="${OUT_DIR}/logs"
+ANTIRECON_FILE="${TMPDIR_CHECK}/antirecon.count"
+{ grep -c "ANTIRECON" /etc/ufw/before.rules 2>/dev/null || echo 0; } > "${ANTIRECON_FILE}"
+ANTIRECON_COUNT="$(cat "${ANTIRECON_FILE}" | tr -d '[:space:]')"
+[ -z "${ANTIRECON_COUNT}" ] && ANTIRECON_COUNT=0
 {
   echo "## Check #4 — BLOQUE 2 anti-reconocimiento"; echo
   echo "\`\`\`bash"
@@ -570,12 +589,12 @@ fi
 {
   echo "# Resultados del Checklist Operacional (Fase 0)"
   echo
-  echo "Generado: \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "Generado: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo
   echo "| Check | Estado | Categoría | Descripción |"
   echo "|---|---|---|---|"
-  printf "${CHECKLIST_SUMMARY}" | \
-    awk -F'|' '{printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4}'
+  printf "%b" "${CHECKLIST_SUMMARY}" | \
+    awk -F'\t' 'NF >= 4 {printf "| %s | %s | %s | %s |\n", $1, $2, $3, $4}'
 } > "${CHECKLIST_RESULT}"
 
 # Mostrar resumen al operador
