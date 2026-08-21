@@ -11,17 +11,23 @@
 #
 # Opciones:
 #   -h, --help                  Muestra esta ayuda.
-#   -o, --output-dir <path>     Dir de salida (default: $HOME/auditoria-<host>-<fecha>)
+#   -o, --output-dir <path>     Dir de salida. Si no se pasa, pregunta al usuario.
+#                               Si corre con sudo, default es $HOME del usuario
+#                               que invoca (no /root).
 #   -c, --cliente <name>        Nombre del cliente (metadata, default: propio).
 #   -r, --rol <rol>             Rol del host (web, db, mail, etc., default: other).
 #   --skip-lynis                No instala/ejecuta Lynis.
 #   --no-install                No intenta instalar paquetes faltantes.
 #   --sin-internet              Asume sin internet; aborta si falta herramienta.
+#   --no-tar                    No comprime al final (solo deja la carpeta).
+#   --tar                       Comprime al final (default).
+#   -y, --yes                   No pregunta nada interactivo, usa defaults.
 #
 # Comportamiento:
 #   - Read-only NUNCA modifica el sistema excepto instalar lynis si se puede.
-#   - Genera árbol de archivos + .tar.gz en ~/ para que el operador lo baje.
-#   - Logs a /tmp por fase y uno consolidado.
+#   - Genera árbol de archivos en el dir de salida (default $HOME del usuario).
+#   - Por defecto comprime en .tar.gz al final para SCP/SFTP.
+#   - Con --no-tar deja la carpeta cruda (útil si vas a inspeccionar local).
 # ============================================================================
 
 set -u
@@ -29,7 +35,6 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-OUT_BASE="${HOME}"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -38,8 +43,15 @@ HORA="$(date -u +%H%M%SZ)"
 SKIP_LYNIS=0
 NO_INSTALL=0
 SIN_INTERNET=0
+MAKE_TAR=1
+ASSUME_YES=0
+OUT_DIR=""
 
-OUT_DIR="${OUT_BASE}/auditoria-${HOST_NOMBRE}-${FECHA}-${HORA}"
+# Detectar el usuario que invocó el script (cuando se corre con sudo).
+# Cuando no hay sudo, este script sigue siendo root pero $HOME ya es el correcto.
+INVOKER_USER="${SUDO_USER:-${USER}}"
+INVOKER_HOME="$(getent passwd "${INVOKER_USER}" 2>/dev/null | cut -d: -f6)"
+[ -z "${INVOKER_HOME}" ] && INVOKER_HOME="${HOME}"
 
 # ---------- Colores ----------
 if [ -t 1 ]; then
@@ -74,9 +86,26 @@ while [ $# -gt 0 ]; do
     --skip-lynis) SKIP_LYNIS=1; shift ;;
     --no-install) NO_INSTALL=1; shift ;;
     --sin-internet) SIN_INTERNET=1; NO_INSTALL=1; shift ;;
+    --no-tar) MAKE_TAR=0; shift ;;
+    --tar) MAKE_TAR=1; shift ;;
+    -y|--yes) ASSUME_YES=1; shift ;;
     *) err "Opción desconocida: $1"; usage ;;
   esac
 done
+
+# ---------- Resolver OUT_DIR si no se pasó por CLI ----------
+if [ -z "${OUT_DIR}" ]; then
+  DEFAULT_OUT="${INVOKER_HOME}/auditoria-${HOST_NOMBRE}-${FECHA}-${HORA}"
+  if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+    printf "Directorio de salida [Enter = %s]: " "${DEFAULT_OUT}"
+    read -r REPLY </dev/tty 2>/dev/null || REPLY="${DEFAULT_OUT}"
+    [ -z "${REPLY}" ] && REPLY="${DEFAULT_OUT}"
+    OUT_DIR="${REPLY}"
+  else
+    OUT_DIR="${DEFAULT_OUT}"
+  fi
+fi
+OUT_BASE="$(dirname "${OUT_DIR}")"
 
 # ---------- Pre-flight ----------
 if [ "$(id -u)" -ne 0 ]; then
@@ -638,7 +667,7 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 | Distro | ${DISTRO_ID} ${DISTRO_VER} (familia: ${DISTRO_FAMILY}) |
 | Fecha UTC | ${FECHA} ${HORA} |
 | Out dir | \`${OUT_DIR}\` |
-| Tarball | \`${OUT_DIR}.tar.gz\` |
+| Tarball | $([ "${MAKE_TAR}" -eq 1 ] && echo "\`${OUT_DIR}.tar.gz\`" || echo "(no generado, usar --no-tar)") |
 
 ## Inventario rápido
 - fail2ban:           $(_h2b fail2ban-client)
@@ -672,14 +701,23 @@ EOF
 # ============================================================================
 section "Empaquetando"
 
-cd "${OUT_BASE}"
-tar -czf "${OUT_DIR}.tar.gz" "$(basename "${OUT_DIR}")"
-TAR_SIZE=$(du -h "${OUT_DIR}.tar.gz" | awk '{print $1}')
-TAR_PATH="${OUT_DIR}.tar.gz"
+TAR_PATH=""
+if [ "${MAKE_TAR}" -eq 1 ]; then
+  cd "${OUT_BASE}"
+  tar -czf "${OUT_DIR}.tar.gz" "$(basename "${OUT_DIR}")"
+  TAR_PATH="${OUT_DIR}.tar.gz"
+  TAR_SIZE=$(du -h "${TAR_PATH}" | awk '{print $1}')
+fi
 
 ok "Listo."
-ok "📦 Reporte empaquetado en: ${TAR_PATH} (${TAR_SIZE})"
+if [ -n "${TAR_PATH}" ]; then
+  ok "📦 Reporte empaquetado en: ${TAR_PATH} (${TAR_SIZE})"
+fi
 ok "📁 Carpeta cruda: ${OUT_DIR}"
-warn "El reporte queda en ${HOME} para descarga inmediata vía SCP/SFTP."
+if [ -n "${TAR_PATH}" ]; then
+  warn "Bajá con: scp ${INVOKER_USER}@${HOST_NOMBRE}:${TAR_PATH} /tmp/"
+else
+  warn "Bajá con: scp -r ${INVOKER_USER}@${HOST_NOMBRE}:${OUT_DIR}/ /tmp/"
+fi
 
 exit 0
