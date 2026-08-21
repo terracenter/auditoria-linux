@@ -79,7 +79,10 @@ while [ $# -gt 0 ]; do
 done
 
 # ---------- Pre-flight ----------
-[ "$(id -u)" -ne 0 ] && { err "Debe ejecutarse como root (sudo)."; exit 2; }
+if [ "$(id -u)" -ne 0 ]; then
+  err "Debe ejecutarse como root (sudo)."
+  exit 2
+fi
 
 mkdir -p "${OUT_DIR}"/{logs,postura-general,acceso-autenticacion,red-firewall,logs-monitoreo,actualizaciones,backups,lynis,snapshots-config}
 exec > >(tee -a "${OUT_DIR}/logs/consolidated.log") 2>&1
@@ -90,14 +93,59 @@ log "Cliente: ${CLIENTE}"
 log "Rol: ${ROL}"
 log "Out dir: ${OUT_DIR}"
 
-# ---------- Distro detection ----------
-. /etc/os-release 2>/dev/null || true
-DISTRO_ID="${ID:-unknown}"
-DISTRO_VER="${VERSION_ID:-unknown}"
-log "Distro: ${DISTRO_ID} ${DISTRO_VER}"
+# ---------- Distro detection (robusta) ----------
+DISTRO_ID="unknown"
+DISTRO_VER="unknown"
+DISTRO_FAMILY="unknown"
+PKG_MGR="unknown"
+LSB_ID=""
+LSB_VER=""
 
-PKG_MGR="apt"
-command -v apt >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 && PKG_MGR="dnf"
+if [ -r /etc/os-release ]; then
+  . /etc/os-release
+  DISTRO_ID="${ID:-unknown}"
+  DISTRO_VER="${VERSION_ID:-unknown}"
+fi
+
+# Detección de familia por ID canónico (no por "qué binario existe")
+case "${DISTRO_ID}" in
+  ubuntu|debian|linuxmint|pop|kali|raspbian|elementary|zorin)
+    DISTRO_FAMILY="debian"
+    PKG_MGR="apt"
+    ;;
+  rhel|centos|rocky|almalinux|fedora|ol|amzn)
+    DISTRO_FAMILY="rhel"
+    PKG_MGR="dnf"
+    ;;
+  sles|opensuse-tumbleweed|opensuse-leap)
+    DISTRO_FAMILY="suse"
+    PKG_MGR="zypper"
+    ;;
+  *)
+    # Fallback: detectar por binario si no se pudo por /etc/os-release
+    if command -v apt-get >/dev/null 2>&1; then
+      DISTRO_FAMILY="debian"
+      PKG_MGR="apt"
+    elif command -v dnf >/dev/null 2>&1; then
+      DISTRO_FAMILY="rhel"
+      PKG_MGR="dnf"
+    elif command -v yum >/dev/null 2>&1; then
+      DISTRO_FAMILY="rhel"
+      PKG_MGR="yum"
+    elif command -v zypper >/dev/null 2>&1; then
+      DISTRO_FAMILY="suse"
+      PKG_MGR="zypper"
+    fi
+    ;;
+esac
+
+log "Distro: ${DISTRO_ID} ${DISTRO_VER} (familia: ${DISTRO_FAMILY}, pkg: ${PKG_MGR})"
+
+# ---------- Helper: ejecutar con sudo si no es root ----------
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+  SUDO="sudo"
+fi
 
 # ---------- Helper: try install ----------
 try_install() {
@@ -106,9 +154,25 @@ try_install() {
     warn "Saltando instalación de ${pkg} (--no-install o --sin-internet)."
     return 1
   fi
+  if [ "${SIN_INTERNET}" -eq 1 ]; then
+    warn "Modo --sin-internet: no instalo ${pkg}."
+    return 1
+  fi
   case "${PKG_MGR}" in
-    apt) DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkg}" >/dev/null 2>&1 ;;
-    dnf) dnf install -y "${pkg}" >/dev/null 2>&1 ;;
+    apt)
+      DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get update -y >/dev/null 2>&1
+      DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install -y "${pkg}" >/dev/null 2>&1
+      ;;
+    dnf|yum)
+      ${SUDO} ${PKG_MGR} install -y "${pkg}" >/dev/null 2>&1
+      ;;
+    zypper)
+      ${SUDO} zypper --non-interactive install "${pkg}" >/dev/null 2>&1
+      ;;
+    *)
+      warn "Package manager ${PKG_MGR} no soportado para instalar ${pkg}."
+      return 1
+      ;;
   esac
 }
 
@@ -511,24 +575,28 @@ ok "Fase 6 completa."
 # ============================================================================
 section "FASE 7 — Lynis (herramienta de auditoría de seguridad)"
 
+LYNIS_OK=0
+
 if [ "${SKIP_LYNIS}" -eq 1 ]; then
   warn "Saltando Lynis por --skip-lynis."
+elif [ "${SIN_INTERNET}" -eq 1 ]; then
+  warn "Modo --sin-internet: no instalo Lynis."
 else
   if ! command -v lynis >/dev/null 2>&1; then
-    warn "Lynis no encontrado. Intentando instalar..."
-    if [ "${NO_INSTALL}" -eq 0 ]; then
-      try_install lynis || {
-        warn "Falla al instalar lynis vía ${PKG_MGR}. Intentando descarga directa desde cisofy.com..."
-        if [ "${SIN_INTERNET}" -eq 0 ]; then
-          cd /tmp
-          wget -q https://downloads.cisofy.com/lynis/lynis-3.0.9.tar.gz -O lynis.tar.gz 2>/dev/null && {
-            tar -xzf lynis.tar.gz
-            cp -a lynis /opt/
-            ln -sf /opt/lynis/lynis /usr/local/bin/lynis
-            ok "Lynis instalado vía tarball."
-          } || warn "No se pudo descargar Lynis tampoco."
-        fi
-      }
+    warn "Lynis no encontrado. Intentando instalar via ${PKG_MGR}..."
+    if try_install lynis; then
+      ok "Lynis instalado via gestor de paquetes."
+    else
+      # GitHub release de Lynis NO publica SHA256SUMS firmado (verificado 2026-08-21
+      # via api.github.com/repos/CISOfy/lynis/releases/latest — assets: []).
+      # Por política de integridad (no descargar binarios sin verificación), no
+      # usamos el tarball. El informe lo marcará como pendiente.
+      warn "Lynis no instalable via gestor de paquetes. NO se descarga tarball"
+      warn "porque la release oficial no publica checksums (verificado en API)."
+      warn "Para resolverse, el operador puede:"
+      warn "  1. apt-get install lynis   (si la distro lo provee)"
+      warn "  2. Compilar desde fuente: https://github.com/CISOfy/lynis (sin verificación)"
+      warn "  3. Deshabilitar Fase 7 con --skip-lynis"
     fi
   fi
 
@@ -539,19 +607,25 @@ else
     lynis audit system --quick --no-colors --logfile "${OUT07}/lynis.log" --report-file "${OUT07}/lynis-report.dat" 2>&1 | tee "${OUT07}/lynis-stdout.txt" || warn "Lynis salió con código no-cero (no es error de auditoría)."
     [ -f "${OUT07}/lynis-report.dat" ] && {
       ok "Lynis reporte: ${OUT07}/lynis-report.dat"
-      # Extraer score de hardening
       HARDENING_SCORE=$(grep -E "^hardening_index|^Hardening index" "${OUT07}/lynis-report.dat" | head -1)
       log "Hardening score: ${HARDENING_SCORE}"
+      LYNIS_OK=1
     }
   else
-    warn "Lynis no disponible. Saltando."
+    warn "Lynis no disponible. Continuando sin Fase 7."
   fi
 fi
+
+# Marcar estado Lynis en resumen
+echo "Lynis: ${LYNIS_OK}" >> "${OUT_DIR}/logs/lynis.status"
 
 # ============================================================================
 # Resumen ejecutivo (auto-generado preliminar)
 # ============================================================================
 section "Generando resumen ejecutivo preliminar"
+
+_h2b() { command -v "$1" >/dev/null 2>&1 && echo "instalado" || echo "NO instalado"; }
+_chrony() { command -v chronyc >/dev/null 2>&1 && echo "chrony-instalado" || (systemctl is-active systemd-timesyncd 2>/dev/null | grep -q active && echo "timesyncd-activo" || echo "NO"); }
 
 cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 # Resumen Ejecutivo Preliminar — Auditoría de Host
@@ -561,23 +635,36 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 | Host | ${HOST_NOMBRE} |
 | Cliente | ${CLIENTE} |
 | Rol | ${ROL} |
-| Distro | ${DISTRO_ID} ${DISTRO_VER} |
+| Distro | ${DISTRO_ID} ${DISTRO_VER} (familia: ${DISTRO_FAMILY}) |
 | Fecha UTC | ${FECHA} ${HORA} |
 | Out dir | \`${OUT_DIR}\` |
+| Tarball | \`${OUT_DIR}.tar.gz\` |
 
 ## Inventario rápido
-- fail2ban:  $(command -v fail2ban-client >/dev/null 2>&1 && echo "instalado" || echo "NO instalado")
-- auditd:    $(command -v auditctl >/dev/null 2>&1 && echo "instalado" || echo "NO instalado")
-- rsyslog:   $(command -v rsyslogd >/dev/null 2>&1 && echo "instalado" || echo "NO instalado")
-- chrony:    $(command -v chronyc >/dev/null 2>&1 && echo "instalado" || echo "NO instalado")
-- unattended-upgrades: $(command -v unattended-upgrade >/dev/null 2>&1 && echo "instalado" || echo "NO instalado")
-- lynis:     $(command -v lynis >/dev/null 2>&1 && echo "instalado/ejecutado" || echo "NO ejecutado")
+- fail2ban:           $(_h2b fail2ban-client)
+- auditd:             $(_h2b auditctl)
+- rsyslog:            $(_h2b rsyslogd)
+- chrony/timesyncd:   $(_chrony)
+- unattended-upgrades: $(_h2b unattended-upgrade)
+- lynis:              $([ "${LYNIS_OK}" -eq 1 ] && echo "INSTALADO+EJECUTADO" || echo "NO EJECUTADO")
+
+## Estado de las fases
+| Fase | Archivo | Estado |
+|---|---|---|
+| 1 — Inventario | \`postura-general/\` | OK |
+| 2 — Acceso/auth | \`acceso-autenticacion/\` | OK |
+| 3 — Red/firewall | \`red-firewall/\` | OK |
+| 4 — Logs/monitoreo | \`logs-monitoreo/\` | OK |
+| 5 — Updates | \`actualizaciones/\` | OK |
+| 6 — Backups | \`backups/\` | OK |
+| 7 — Lynis | \`lynis/\` | $([ "${LYNIS_OK}" -eq 1 ] && echo "OK" || echo "FALTA (no instalado)") |
 
 ## Próximos pasos (humano)
 1. Bajar el tarball: \`${OUT_DIR}.tar.gz\` desde \`${HOME}/\`.
-2. Pasarlo al sysadmin para análisis.
+2. Parsear cada archivo .md por fase.
 3. Comparar contra CIS Ubuntu 22.04 Benchmark v2.0.0.
 4. Armar tabla de hallazgos P0/P1/P2.
+5. Si Lynis falta: el operador debe revisarlo y decidir qué hallazgos cubre solo.
 EOF
 
 # ============================================================================
