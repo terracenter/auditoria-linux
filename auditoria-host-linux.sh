@@ -738,6 +738,23 @@ if [ "${MAKE_TAR}" -eq 1 ]; then
   TAR_SIZE=$(du -h "${TAR_PATH}" | awk '{print $1}')
 fi
 
+# ---------- Ajuste de permisos al usuario que invocó el script ----------
+# Si el script corrió bajo sudo (INVOKER_USER != root), transferimos ownership
+# del directorio y del tarball al usuario real para que pueda scp/editar sin
+# escalación adicional. Esto cubre los casos:
+#   - sudo bash script.sh           -> INVOKER_USER = usuario original
+#   - sudo -u otro bash script.sh   -> INVOKER_USER = "otro"
+#   - bash script.sh (como root)    -> INVOKER_USER = root, no se cambia
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+  log "Ajustando ownership a ${INVOKER_USER}:${INVOKER_USER} para SCP sin escalación."
+  if chown -R "${INVOKER_USER}:${INVOKER_USER}" "${OUT_DIR}" 2>/dev/null; then
+    [ -n "${TAR_PATH}" ] && chown "${INVOKER_USER}:${INVOKER_USER}" "${TAR_PATH}" 2>/dev/null || true
+    ok "Ownership aplicado a ${OUT_DIR}"
+  else
+    warn "No se pudo aplicar chown a ${OUT_DIR} (¿filesystem readonly?). El reporte queda como root:root."
+  fi
+fi
+
 ok "Listo."
 if [ -n "${TAR_PATH}" ]; then
   ok "📦 Reporte empaquetado en: ${TAR_PATH} (${TAR_SIZE})"
