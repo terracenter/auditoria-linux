@@ -36,6 +36,10 @@
 #                               (default: la carpeta cruda se borra para no dejar basura).
 #   --no-cleanup                No limpia corridas anteriores con permisos root:root.
 #                               (default: las limpia al inicio).
+#   --send                      Al final envía el reporte por scp/rsync.
+#   --send-method <scp|rsync>   Método de envío (default: scp).
+#   --send-target <user@host:/path/> Destino remoto no interactivo.
+#   --no-send                   No pregunta ni envía reporte al final.
 #   -y, --yes                   No pregunta nada interactivo, usa defaults.
 #
 # Comportamiento:
@@ -63,6 +67,9 @@ MAKE_TAR=1
 KEEP_TREE=0
 ASSUME_YES=0
 NO_CLEANUP=0
+SEND_REPORT="ask"
+SEND_METHOD="scp"
+SEND_TARGET=""
 OUT_DIR=""
 
 # Detectar el usuario que invocó el script (cuando se corre con sudo).
@@ -90,7 +97,7 @@ section(){ printf "\n${C_BLU}==== %s ====${C_RST}\n" "$*"; }
 
 # ---------- Help ----------
 usage() {
-  sed -n '2,30p' "$0"
+  sed -n '2,51p' "$0"
   exit 0
 }
 
@@ -108,6 +115,10 @@ while [ $# -gt 0 ]; do
     --tar) MAKE_TAR=1; shift ;;
     --keep-tree) KEEP_TREE=1; shift ;;
     --no-cleanup) NO_CLEANUP=1; shift ;;
+    --send) SEND_REPORT="yes"; shift ;;
+    --send-method) SEND_METHOD="$2"; shift 2 ;;
+    --send-target) SEND_TARGET="$2"; SEND_REPORT="yes"; shift 2 ;;
+    --no-send) SEND_REPORT="no"; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
     *) err "Opción desconocida: $1"; usage ;;
   esac
@@ -1185,6 +1196,64 @@ if [ -n "${TAR_PATH}" ]; then
   warn "Bajá con: scp ${INVOKER_USER}@${HOST_NOMBRE}:${TAR_PATH} /tmp/"
 elif [ -d "${OUT_DIR}" ]; then
   warn "Bajá con: scp -r ${INVOKER_USER}@${HOST_NOMBRE}:${OUT_DIR}/ /tmp/"
+fi
+
+# ---------- Envío opcional del reporte ----------
+REPORT_PATH=""
+if [ -n "${TAR_PATH}" ]; then
+  REPORT_PATH="${TAR_PATH}"
+elif [ -d "${OUT_DIR}" ]; then
+  REPORT_PATH="${OUT_DIR}/"
+fi
+
+if [ -n "${REPORT_PATH}" ]; then
+  if [ "${SEND_REPORT}" = "ask" ]; then
+    if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+      printf "¿Enviar reporte ahora por scp/rsync? [s/N]: "
+      read -r REPLY </dev/tty 2>/dev/null || REPLY="n"
+      case "${REPLY}" in
+        s|S|si|SI|sí|SÍ|y|Y|yes|YES) SEND_REPORT="yes" ;;
+        *) SEND_REPORT="no" ;;
+      esac
+    else
+      SEND_REPORT="no"
+    fi
+  fi
+
+  if [ "${SEND_REPORT}" = "yes" ]; then
+    if [ -z "${SEND_TARGET}" ]; then
+      if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+        printf "Destino remoto [usuario@host:/ruta/]: "
+        read -r SEND_TARGET </dev/tty 2>/dev/null || SEND_TARGET=""
+      fi
+    fi
+
+    if [ -z "${SEND_TARGET}" ]; then
+      warn "Envío solicitado, pero no se indicó destino remoto. Reporte local: ${REPORT_PATH}"
+    else
+      case "${SEND_METHOD}" in
+        scp)
+          log "Enviando reporte por scp a ${SEND_TARGET}"
+          if scp -p "${REPORT_PATH}" "${SEND_TARGET}"; then
+            ok "Reporte enviado por scp a ${SEND_TARGET}"
+          else
+            warn "Falló el envío por scp. Reporte local: ${REPORT_PATH}"
+          fi
+          ;;
+        rsync)
+          log "Enviando reporte por rsync a ${SEND_TARGET}"
+          if rsync --progress -razuz "${REPORT_PATH}" "${SEND_TARGET}"; then
+            ok "Reporte enviado por rsync a ${SEND_TARGET}"
+          else
+            warn "Falló el envío por rsync. Reporte local: ${REPORT_PATH}"
+          fi
+          ;;
+        *)
+          warn "Método de envío no soportado: ${SEND_METHOD}. Usa scp o rsync. Reporte local: ${REPORT_PATH}"
+          ;;
+      esac
+    fi
+  fi
 fi
 
 exit 0
