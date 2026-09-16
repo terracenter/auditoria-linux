@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================================
-# auditoria-host-linux.sh — Auditoría de Host Linux o Windows (si aplica)
+# auditoria-host-linux.sh — Auditoría de Host Linux
 # ============================================================================
-# Auditoría operativa de postura, red, firewall, accesos, logs, paquetes,
-# backups y controles básicos de seguridad del host.
+# Auditoría operativa multidistribución para hosts Linux: postura, red,
+# firewall, accesos, logs, paquetes, backups y controles básicos de seguridad.
 #
 # Fases:
 #   0 — Checklist operacional (10 validaciones críticas, aborta si no hay firewall)
@@ -53,7 +53,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-2"
+SCRIPT_VERSION="2026.09.16-3"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -98,11 +98,11 @@ section(){ printf "\n${C_BLU}==== %s ====${C_RST}\n" "$*"; }
 usage() {
   cat <<EOF
 ================
-${SCRIPT_NAME} — Auditoría de Host Linux o Windows (si aplica)
+${SCRIPT_NAME} — Auditoría de Host Linux
 Versión: ${SCRIPT_VERSION}
 ================
-Auditoría operativa de postura, red, firewall, accesos, logs, paquetes,
-backups y controles básicos de seguridad del host.
+Auditoría operativa multidistribución para hosts Linux: postura, red,
+firewall, accesos, logs, paquetes, backups y controles básicos de seguridad.
 
 Fases:
 0 — Checklist operacional (10 validaciones críticas, aborta si no hay firewall)
