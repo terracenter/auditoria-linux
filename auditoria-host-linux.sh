@@ -36,7 +36,8 @@
 #                               (default: las limpia al inicio).
 #   --send                      Al final envía el reporte por scp/rsync.
 #   --send-method <scp|rsync>   Método de envío (default: scp).
-#   --send-target <user@host:/path/> Destino remoto no interactivo.
+#   --send-target <user@host:/path>  Destino remoto no interactivo.
+#                               Si se pasa user@host sin ruta, usa /tmp/<archivo>.
 #   --no-send                   No pregunta ni envía reporte al final.
 #   -y, --yes                   No pregunta nada interactivo, usa defaults.
 #
@@ -53,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-3"
+SCRIPT_VERSION="2026.09.16-4"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -134,7 +135,8 @@ Opciones:
 --no-cleanup                       No limpia corridas anteriores con permisos root:root.
 --send                             Al final envía el reporte por scp/rsync.
 --send-method <scp|rsync>          Método de envío (default: scp).
---send-target <user@host:/path/>   Destino remoto no interactivo.
+--send-target <user@host:/path>    Destino remoto no interactivo.
+                                   Si se pasa user@host sin ruta, usa /tmp/<archivo>.
 --no-send                          No pregunta ni envía reporte al final.
 -y, --yes                          No pregunta nada interactivo, usa defaults.
 EOF
@@ -1248,6 +1250,9 @@ elif [ -d "${OUT_DIR}" ]; then
 fi
 
 if [ -n "${REPORT_PATH}" ]; then
+  REPORT_BASENAME="$(basename "${REPORT_PATH%/}")"
+  DEFAULT_REMOTE_PATH="/tmp/${REPORT_BASENAME}"
+
   if [ "${SEND_REPORT}" = "ask" ]; then
     if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
       printf "¿Enviar reporte ahora por scp/rsync? [s/N]: "
@@ -1264,18 +1269,29 @@ if [ -n "${REPORT_PATH}" ]; then
   if [ "${SEND_REPORT}" = "yes" ]; then
     if [ -z "${SEND_TARGET}" ]; then
       if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
-        printf "Destino remoto [usuario@host:/ruta/]: "
+        printf "Destino remoto [usuario@host:%s]: " "${DEFAULT_REMOTE_PATH}"
         read -r SEND_TARGET </dev/tty 2>/dev/null || SEND_TARGET=""
+        case "${SEND_TARGET}" in
+          *@*:*) : ;;
+          *@*) SEND_TARGET="${SEND_TARGET}:${DEFAULT_REMOTE_PATH}" ;;
+        esac
       fi
     fi
 
     if [ -z "${SEND_TARGET}" ]; then
       warn "Envío solicitado, pero no se indicó destino remoto. Reporte local: ${REPORT_PATH}"
     else
+      case "${SEND_TARGET}" in
+        *@*:*) : ;;
+        *@*) SEND_TARGET="${SEND_TARGET}:${DEFAULT_REMOTE_PATH}" ;;
+      esac
+
+      SSH_SEND_OPTS=(-o StrictHostKeyChecking=accept-new)
+
       case "${SEND_METHOD}" in
         scp)
           log "Enviando reporte por scp a ${SEND_TARGET}"
-          if scp -p "${REPORT_PATH}" "${SEND_TARGET}"; then
+          if scp "${SSH_SEND_OPTS[@]}" -p "${REPORT_PATH}" "${SEND_TARGET}"; then
             ok "Reporte enviado por scp a ${SEND_TARGET}"
           else
             warn "Falló el envío por scp. Reporte local: ${REPORT_PATH}"
@@ -1283,7 +1299,7 @@ if [ -n "${REPORT_PATH}" ]; then
           ;;
         rsync)
           log "Enviando reporte por rsync a ${SEND_TARGET}"
-          if rsync --progress -razuz "${REPORT_PATH}" "${SEND_TARGET}"; then
+          if rsync -e "ssh -o StrictHostKeyChecking=accept-new" --progress -razuz "${REPORT_PATH}" "${SEND_TARGET}"; then
             ok "Reporte enviado por rsync a ${SEND_TARGET}"
           else
             warn "Falló el envío por rsync. Reporte local: ${REPORT_PATH}"
