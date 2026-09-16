@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-6"
+SCRIPT_VERSION="2026.09.16-7"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -365,6 +365,111 @@ lynis_update_status_from_file() {
   awk -F: '/^[[:space:]]*Status[[:space:]]*:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "${file}" 2>/dev/null || true
 }
 
+debian_codename() {
+  if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    printf '%s\n' "${VERSION_CODENAME:-}"
+  fi
+}
+
+debian_release_state() {
+  local major="$1"
+  case "${major}" in
+    13) echo "stable" ;;
+    12) echo "oldstable" ;;
+    11) echo "oldoldstable/LTS" ;;
+    10|9|8|7|6|5|4|3|2|1) echo "EOL-o-fuera-de-soporte-regular" ;;
+    *) echo "desconocido" ;;
+  esac
+}
+
+write_debian_upgrade_recommendation() {
+  [ "${DISTRO_ID}" = "debian" ] || return 0
+
+  local latest_major="13"
+  local latest_codename="trixie"
+  local latest_point="13.7"
+  local latest_checked="2026-09-16"
+  local installed_major="${DISTRO_VER%%.*}"
+  local installed_codename
+  local installed_state
+  local rec_file="${OUT_DIR}/actualizaciones/debian-release-recomendacion.md"
+
+  installed_codename="$(debian_codename)"
+  installed_state="$(debian_release_state "${installed_major}")"
+
+  cat > "${rec_file}" <<EOF
+# Recomendación de versión Debian — ${HOST_NOMBRE}
+
+| Campo | Valor |
+|---|---|
+| Host | ${HOST_NOMBRE} |
+| Debian instalado | ${DISTRO_VER} ${installed_codename:-unknown} |
+| Estado instalado | ${installed_state} |
+| Última stable Debian validada | ${latest_major} ${latest_codename} (${latest_point}) |
+| Fuente | https://www.debian.org/releases/ |
+| Fecha de validación de esta regla | ${latest_checked} |
+
+## Evaluación
+EOF
+
+  if [ "${installed_major}" != "${latest_major}" ]; then
+    cat >> "${rec_file}" <<EOF
+
+El host no está en la última stable de Debian. Esto puede explicar que paquetes de la distribución, por ejemplo Lynis, estén por detrás del upstream aunque el sistema esté correctamente actualizado dentro de su rama.
+
+## Recomendación principal
+
+Planificar upgrade controlado del sistema operativo a Debian ${latest_major} ${latest_codename}.
+
+## Tarea a crear si no se puede actualizar ahora
+
+- Cliente: ${CLIENTE}
+- Host: ${HOST_NOMBRE}
+- Tipo: actualización de versión Linux
+- Prioridad sugerida: Media/Alta según exposición del host
+- Título: Planificar upgrade de ${HOST_NOMBRE} desde Debian ${DISTRO_VER} ${installed_codename:-unknown} a Debian ${latest_major} ${latest_codename}
+- Motivo: mantener soporte, paquetes de seguridad y herramientas de auditoría más cercanas a upstream.
+- Nota: no hacer upgrade automático desde este script; requiere ventana, backup, snapshot y plan de rollback.
+EOF
+    warn "Debian ${DISTRO_VER} no es la última stable (${latest_major} ${latest_codename}). Recomendación: ${rec_file}"
+  else
+    cat >> "${rec_file}" <<EOF
+
+El host está en la última stable conocida por esta regla. No se genera tarea de upgrade de versión Debian por antigüedad de release.
+EOF
+    ok "Debian está en la última stable conocida (${latest_major} ${latest_codename})."
+  fi
+}
+
+write_lynis_upstream_recommendation() {
+  local rec_file="${OUT_DIR}/lynis/lynis-upstream-recomendacion.md"
+  mkdir -p "${OUT_DIR}/lynis"
+  cat > "${rec_file}" <<EOF
+# Recomendación Lynis upstream — ${HOST_NOMBRE}
+
+## Criterio operativo
+
+La recomendación principal es mantener el sistema operativo en una versión soportada y actualizada. En Debian, la rama stable puede traer una versión de Lynis más vieja que upstream por política de estabilidad.
+
+Si el OS no puede actualizarse todavía, usar https://github.com/CISOfy/lynis puede ser una alternativa temporal para ejecutar una auditoría más reciente, pero no debe reemplazar el upgrade del sistema operativo.
+
+## Validación upstream realizada
+
+- Repositorio: https://github.com/CISOfy/lynis
+- El repositorio sigue activo según GitHub API validada el 2026-09-16.
+- Última release observada en GitHub API el 2026-09-16: 3.1.7 (2026-06-25).
+- El changelog público contiene trabajo posterior hacia 3.1.8 no liberado.
+- Las releases de GitHub no publican assets/checksums; no se debe descargar/ejecutar tarball sin verificación de integridad.
+
+## Orden recomendado
+
+1. Preferido: actualizar el host a la última versión stable de la distribución.
+2. Si no se puede actualizar el OS: evaluar instalación temporal/controlada de Lynis desde fuente oficial CISOfy/GitHub, documentando commit/tag usado y hash local.
+3. No hacer esa instalación automáticamente desde este script sin autorización explícita.
+EOF
+}
+
 # ---------- Helper: write section ----------
 write_phase_header() {
   local phase="$1"; local desc="$2"
@@ -377,6 +482,8 @@ Cliente: ${CLIENTE}
 
 EOF
 }
+
+write_debian_upgrade_recommendation
 
 # ============================================================================
 # FASE 0 — Checklist operacional (10 validaciones críticas)
@@ -1166,6 +1273,7 @@ else
     LYNIS_STATUS_AFTER="$(lynis_update_status_from_file "${LYNIS_UPDATE_INFO_AFTER}")"
 
     if [ "${LYNIS_STATUS_AFTER}" = "Outdated" ]; then
+      write_lynis_upstream_recommendation
       warn "Lynis sigue desactualizado según 'lynis update info'. Revisar ${LYNIS_UPDATE_INFO_AFTER}."
       warn "No ejecutes 'lynis update' solo: Lynis exige target. Usa 'lynis update info' o 'lynis update check'."
       warn "Si el paquete de la distro está viejo, se debe instalar/actualizar desde repositorio oficial CISOfy con autorización."
