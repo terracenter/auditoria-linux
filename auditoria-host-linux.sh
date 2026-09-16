@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-5"
+SCRIPT_VERSION="2026.09.16-6"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -352,6 +352,17 @@ lynis_version() {
   if command -v lynis >/dev/null 2>&1; then
     lynis show version 2>/dev/null | head -1 || lynis --version 2>/dev/null | head -1 || true
   fi
+}
+
+lynis_update_info() {
+  if command -v lynis >/dev/null 2>&1; then
+    lynis update info 2>&1 || true
+  fi
+}
+
+lynis_update_status_from_file() {
+  local file="$1"
+  awk -F: '/^[[:space:]]*Status[[:space:]]*:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "${file}" 2>/dev/null || true
 }
 
 # ---------- Helper: write section ----------
@@ -1138,20 +1149,41 @@ else
     mkdir -p "${OUT07}"
 
     LYNIS_VERSION_BEFORE="$(lynis_version)"
-    log "Lynis instalado: ${LYNIS_VERSION_BEFORE:-version no detectada}. Validando actualización via ${PKG_MGR}."
+    LYNIS_UPDATE_INFO_BEFORE="${OUT07}/lynis-update-info.before.txt"
+    LYNIS_UPDATE_INFO_AFTER="${OUT07}/lynis-update-info.after.txt"
+    lynis_update_info > "${LYNIS_UPDATE_INFO_BEFORE}"
+    LYNIS_STATUS_BEFORE="$(lynis_update_status_from_file "${LYNIS_UPDATE_INFO_BEFORE}")"
+
+    log "Lynis instalado: ${LYNIS_VERSION_BEFORE:-version no detectada}. Estado upstream: ${LYNIS_STATUS_BEFORE:-no detectado}. Validando actualización via ${PKG_MGR}."
     if update_installed_package lynis; then
-      LYNIS_VERSION_AFTER="$(lynis_version)"
-      ok "Lynis validado/actualizado via gestor de paquetes: ${LYNIS_VERSION_AFTER:-version no detectada}"
+      ok "Lynis validado/actualizado via gestor de paquetes."
     else
-      LYNIS_VERSION_AFTER="$(lynis_version)"
-      warn "No se pudo validar actualización de Lynis via gestor de paquetes. Versión actual: ${LYNIS_VERSION_AFTER:-version no detectada}"
+      warn "No se pudo actualizar Lynis via gestor de paquetes."
+    fi
+
+    LYNIS_VERSION_AFTER="$(lynis_version)"
+    lynis_update_info > "${LYNIS_UPDATE_INFO_AFTER}"
+    LYNIS_STATUS_AFTER="$(lynis_update_status_from_file "${LYNIS_UPDATE_INFO_AFTER}")"
+
+    if [ "${LYNIS_STATUS_AFTER}" = "Outdated" ]; then
+      warn "Lynis sigue desactualizado según 'lynis update info'. Revisar ${LYNIS_UPDATE_INFO_AFTER}."
+      warn "No ejecutes 'lynis update' solo: Lynis exige target. Usa 'lynis update info' o 'lynis update check'."
+      warn "Si el paquete de la distro está viejo, se debe instalar/actualizar desde repositorio oficial CISOfy con autorización."
+    elif [ -n "${LYNIS_STATUS_AFTER}" ]; then
+      ok "Lynis estado upstream: ${LYNIS_STATUS_AFTER}. Versión: ${LYNIS_VERSION_AFTER:-version no detectada}"
+    else
+      warn "No se pudo determinar estado upstream de Lynis. Revisar ${LYNIS_UPDATE_INFO_AFTER}."
     fi
 
     {
       echo "lynis_version_before=${LYNIS_VERSION_BEFORE:-unknown}"
       echo "lynis_version_after=${LYNIS_VERSION_AFTER:-unknown}"
+      echo "lynis_status_before=${LYNIS_STATUS_BEFORE:-unknown}"
+      echo "lynis_status_after=${LYNIS_STATUS_AFTER:-unknown}"
       echo "package_manager=${PKG_MGR}"
       echo "updated_checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "update_info_before=${LYNIS_UPDATE_INFO_BEFORE}"
+      echo "update_info_after=${LYNIS_UPDATE_INFO_AFTER}"
     } > "${OUT07}/lynis-version.txt"
 
     log "Ejecutando: lynis audit system --quick --no-colors"
