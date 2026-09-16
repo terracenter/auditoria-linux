@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================================
-# auditoria-host-linux.sh — Auditoría read-only de host Linux
+# auditoria-host-linux.sh — Auditoría de Host Linux o Windows (si aplica)
 # ============================================================================
-# Basado en la plantilla: Obsidian/Planes/_templates/auditoria-host-linux.md
-# Marcos: CIS Controls v8, CIS Ubuntu 22.04 Benchmark v2.0.0, NIST SP 800-53.
-# Tooling: herramientas estándar + Lynis (audit system --quick).
-# Estándar operativo: Obsidian/03_Manuales_Borradores/Seguridad/Manual/
+# Auditoría operativa de postura, red, firewall, accesos, logs, paquetes,
+# backups y controles básicos de seguridad del host.
 #
 # Fases:
 #   0 — Checklist operacional (10 validaciones críticas, aborta si no hay firewall)
@@ -55,6 +53,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
+SCRIPT_VERSION="2026.09.16-2"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -97,7 +96,48 @@ section(){ printf "\n${C_BLU}==== %s ====${C_RST}\n" "$*"; }
 
 # ---------- Help ----------
 usage() {
-  sed -n '2,51p' "$0"
+  cat <<EOF
+================
+${SCRIPT_NAME} — Auditoría de Host Linux o Windows (si aplica)
+Versión: ${SCRIPT_VERSION}
+================
+Auditoría operativa de postura, red, firewall, accesos, logs, paquetes,
+backups y controles básicos de seguridad del host.
+
+Fases:
+0 — Checklist operacional (10 validaciones críticas, aborta si no hay firewall)
+1 — Inventario y postura general
+2 — Acceso y autenticación (sshd, sudoers, PAM)
+3 — Red y firewall (ufw/nft/iptables, sysctl, DNS)
+4 — Logs, monitoreo y tiempo
+5 — Actualizaciones y paquetes
+6 — Backups del host
+7 — Lynis (herramienta externa, si está disponible o se puede instalar)
+
+Uso:
+sudo ./auditoria-host-linux.sh [OPCIONES]
+
+Opciones:
+-h, --help                         Muestra esta ayuda.
+--version                          Muestra la versión del script.
+-o, --output-dir <path>            Dir de salida. Si no se pasa, pregunta al usuario.
+                                   Si corre con sudo, default es \$HOME del usuario
+                                   que invoca (no /root).
+-c, --cliente <name>               Nombre del cliente (metadata, default: propio).
+-r, --rol <rol>                    Rol del host (web, db, mail, firewall, etc.).
+--skip-lynis                       No instala/ejecuta Lynis.
+--no-install                       No intenta instalar paquetes faltantes.
+--sin-internet                     Asume sin internet; aborta si falta herramienta.
+--no-tar                           No comprime al final (solo deja la carpeta).
+--tar                              Comprime al final (default).
+--keep-tree                        Después de empaquetar, conserva la carpeta cruda.
+--no-cleanup                       No limpia corridas anteriores con permisos root:root.
+--send                             Al final envía el reporte por scp/rsync.
+--send-method <scp|rsync>          Método de envío (default: scp).
+--send-target <user@host:/path/>   Destino remoto no interactivo.
+--no-send                          No pregunta ni envía reporte al final.
+-y, --yes                          No pregunta nada interactivo, usa defaults.
+EOF
   exit 0
 }
 
@@ -105,6 +145,7 @@ usage() {
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage ;;
+    --version) printf '%s\n' "${SCRIPT_VERSION}"; exit 0 ;;
     -o|--output-dir) OUT_DIR="$2"; shift 2 ;;
     -c|--cliente) CLIENTE="$2"; shift 2 ;;
     -r|--rol) ROL="$2"; shift 2 ;;
