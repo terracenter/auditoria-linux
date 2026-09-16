@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-4"
+SCRIPT_VERSION="2026.09.16-5"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -321,6 +321,37 @@ try_install() {
       return 1
       ;;
   esac
+}
+
+update_installed_package() {
+  local pkg="$1"
+  if [ "${NO_INSTALL}" -eq 1 ] || [ "${SIN_INTERNET}" -eq 1 ]; then
+    warn "No se valida actualización de ${pkg} (--no-install o --sin-internet)."
+    return 1
+  fi
+
+  case "${PKG_MGR}" in
+    apt)
+      DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get update -y >/dev/null 2>&1 || return 1
+      DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get install --only-upgrade -y "${pkg}" >/dev/null 2>&1 || return 1
+      ;;
+    dnf|yum)
+      ${SUDO} ${PKG_MGR} upgrade -y "${pkg}" >/dev/null 2>&1 || return 1
+      ;;
+    zypper)
+      ${SUDO} zypper --non-interactive update "${pkg}" >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      warn "Package manager ${PKG_MGR} no soportado para actualizar ${pkg}."
+      return 1
+      ;;
+  esac
+}
+
+lynis_version() {
+  if command -v lynis >/dev/null 2>&1; then
+    lynis show version 2>/dev/null | head -1 || lynis --version 2>/dev/null | head -1 || true
+  fi
 }
 
 # ---------- Helper: write section ----------
@@ -1105,8 +1136,43 @@ else
   if command -v lynis >/dev/null 2>&1; then
     OUT07="${OUT_DIR}/lynis"
     mkdir -p "${OUT07}"
+
+    LYNIS_VERSION_BEFORE="$(lynis_version)"
+    log "Lynis instalado: ${LYNIS_VERSION_BEFORE:-version no detectada}. Validando actualización via ${PKG_MGR}."
+    if update_installed_package lynis; then
+      LYNIS_VERSION_AFTER="$(lynis_version)"
+      ok "Lynis validado/actualizado via gestor de paquetes: ${LYNIS_VERSION_AFTER:-version no detectada}"
+    else
+      LYNIS_VERSION_AFTER="$(lynis_version)"
+      warn "No se pudo validar actualización de Lynis via gestor de paquetes. Versión actual: ${LYNIS_VERSION_AFTER:-version no detectada}"
+    fi
+
+    {
+      echo "lynis_version_before=${LYNIS_VERSION_BEFORE:-unknown}"
+      echo "lynis_version_after=${LYNIS_VERSION_AFTER:-unknown}"
+      echo "package_manager=${PKG_MGR}"
+      echo "updated_checked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "${OUT07}/lynis-version.txt"
+
     log "Ejecutando: lynis audit system --quick --no-colors"
-    lynis audit system --quick --no-colors --logfile "${OUT07}/lynis.log" --report-file "${OUT07}/lynis-report.dat" 2>&1 | tee "${OUT07}/lynis-stdout.txt" || warn "Lynis salió con código no-cero (no es error de auditoría)."
+    LYNIS_RAW_STDOUT="${OUT07}/lynis-stdout.raw.txt"
+    LYNIS_FILTERED_STDOUT="${OUT07}/lynis-stdout.txt"
+    LYNIS_FILTERED_WARNINGS="${OUT07}/lynis-filtered-warnings.txt"
+
+    set +o pipefail
+    lynis audit system --quick --no-colors --logfile "${OUT07}/lynis.log" --report-file "${OUT07}/lynis-report.dat" 2>&1 \
+      | tee "${LYNIS_RAW_STDOUT}" \
+      | grep -v -F -e "pgrep: pattern that searches for process name longer than 15 characters will result in zero matches" -e "Try \`pgrep -f' option to match against the complete command line." \
+      | tee "${LYNIS_FILTERED_STDOUT}"
+    LYNIS_RC=${PIPESTATUS[0]}
+    set -o pipefail
+
+    grep -F -e "pgrep: pattern that searches for process name longer than 15 characters will result in zero matches" -e "Try \`pgrep -f' option to match against the complete command line." "${LYNIS_RAW_STDOUT}" > "${LYNIS_FILTERED_WARNINGS}" 2>/dev/null || true
+    if [ -s "${LYNIS_FILTERED_WARNINGS}" ]; then
+      warn "Lynis emitió warnings de pgrep; se guardaron en ${LYNIS_FILTERED_WARNINGS} y no se muestran como ruido operativo."
+    fi
+
+    [ "${LYNIS_RC}" -ne 0 ] && warn "Lynis salió con código no-cero (${LYNIS_RC}); revisar ${LYNIS_RAW_STDOUT}."
     [ -f "${OUT07}/lynis-report.dat" ] && {
       ok "Lynis reporte: ${OUT07}/lynis-report.dat"
       HARDENING_SCORE=$(grep -E "^hardening_index|^Hardening index" "${OUT07}/lynis-report.dat" | head -1)
@@ -1234,11 +1300,6 @@ if [ -n "${TAR_PATH}" ]; then
 fi
 if [ "${KEEP_TREE}" -eq 1 ] && [ -d "${OUT_DIR}" ]; then
   ok "📁 Carpeta cruda (conservada por --keep-tree): ${OUT_DIR}"
-fi
-if [ -n "${TAR_PATH}" ]; then
-  warn "Bajá con: scp ${INVOKER_USER}@${HOST_NOMBRE}:${TAR_PATH} /tmp/"
-elif [ -d "${OUT_DIR}" ]; then
-  warn "Bajá con: scp -r ${INVOKER_USER}@${HOST_NOMBRE}:${OUT_DIR}/ /tmp/"
 fi
 
 # ---------- Envío opcional del reporte ----------
