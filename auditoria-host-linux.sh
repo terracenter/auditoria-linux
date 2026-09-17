@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.17-2"
+SCRIPT_VERSION="2026.09.17-3"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -126,6 +126,16 @@ report_sent_marker() {
   fi
 }
 
+write_sent_marker() {
+  local marker="$1"
+  local method="$2"
+  local target="$3"
+  printf 'sent_at=%s\nmethod=%s\ntarget=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${method}" "${target}" > "${marker}" 2>/dev/null || return 0
+  if [ -n "${INVOKER_USER:-}" ] && [ "$(id -u 2>/dev/null || echo 1)" -eq 0 ]; then
+    chown "${INVOKER_USER}:${INVOKER_USER}" "${marker}" 2>/dev/null || chown "${INVOKER_USER}" "${marker}" 2>/dev/null || true
+  fi
+}
+
 normalize_send_target() {
   local target="$1"
   local default_remote_path="$2"
@@ -176,13 +186,13 @@ send_report_file() {
         if scp -o StrictHostKeyChecking=accept-new -pr "${report_path%/}" "${send_target}"; then
           ok "Reporte enviado por scp a ${send_target}"
           marker="$(report_sent_marker "${report_path}")"
-          printf 'sent_at=%s\nmethod=scp\ntarget=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${send_target}" > "${marker}" 2>/dev/null || true
+          write_sent_marker "${marker}" "scp" "${send_target}"
           return 0
         fi
       elif scp -o StrictHostKeyChecking=accept-new -p "${report_path}" "${send_target}"; then
         ok "Reporte enviado por scp a ${send_target}"
         marker="$(report_sent_marker "${report_path}")"
-        printf 'sent_at=%s\nmethod=scp\ntarget=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${send_target}" > "${marker}" 2>/dev/null || true
+        write_sent_marker "${marker}" "scp" "${send_target}"
         return 0
       fi
       warn "Falló el envío por scp. Reporte local: ${report_path}"
@@ -193,7 +203,7 @@ send_report_file() {
       if rsync -e "ssh -o StrictHostKeyChecking=accept-new" --progress -razuz "${report_path}" "${send_target}"; then
         ok "Reporte enviado por rsync a ${send_target}"
         marker="$(report_sent_marker "${report_path}")"
-        printf 'sent_at=%s\nmethod=rsync\ntarget=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${send_target}" > "${marker}" 2>/dev/null || true
+        write_sent_marker "${marker}" "rsync" "${send_target}"
         return 0
       fi
       warn "Falló el envío por rsync. Reporte local: ${report_path}"
