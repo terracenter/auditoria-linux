@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-9"
+SCRIPT_VERSION="2026.09.17-1"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -94,6 +94,28 @@ ok()     { printf "${C_GRN}[+]${C_RST} %s\n" "$*"; }
 warn()   { printf "${C_YEL}[!]${C_RST} %s\n" "$*" >&2; }
 err()    { printf "${C_RED}[-]${C_RST} %s\n" "$*" >&2; }
 section(){ printf "\n${C_BLU}==== %s ====${C_RST}\n" "$*"; }
+
+# ---------- Entrada interactiva robusta ----------
+# Lynis y otros comandos pueden consumir stdin durante una auditoría larga. Abrimos
+# el TTY del operador una sola vez al inicio y todos los prompts leen desde este FD.
+HAVE_TTY_INPUT=0
+if [ -r /dev/tty ]; then
+  if { exec 3</dev/tty; } 2>/dev/null; then
+    HAVE_TTY_INPUT=1
+  fi
+fi
+
+prompt_read() {
+  local __var="$1"
+  local __default="${2:-}"
+  if [ "${ASSUME_YES}" -eq 0 ] && [ "${HAVE_TTY_INPUT}" -eq 1 ]; then
+    if IFS= read -r "$__var" <&3; then
+      return 0
+    fi
+  fi
+  printf -v "$__var" '%s' "$__default"
+  return 1
+}
 
 # ---------- Help ----------
 usage() {
@@ -170,9 +192,9 @@ done
 # ---------- Resolver OUT_DIR si no se pasó por CLI ----------
 if [ -z "${OUT_DIR}" ]; then
   DEFAULT_OUT="${INVOKER_HOME}/auditoria-${HOST_NOMBRE}-${FECHA}-${HORA}"
-  if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+  if [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
     printf "Directorio de salida [Enter = %s]: " "${DEFAULT_OUT}"
-    read -r REPLY || REPLY="${DEFAULT_OUT}"
+    prompt_read REPLY "${DEFAULT_OUT}" || true
     [ -z "${REPLY}" ] && REPLY="${DEFAULT_OUT}"
     OUT_DIR="${REPLY}"
   else
@@ -206,9 +228,9 @@ if [ "${NO_CLEANUP}" -eq 0 ] && [ -n "${INVOKER_USER}" ] && [ "${INVOKER_USER}" 
       [ "${stale_dir}" = "${OUT_DIR}" ] && continue
       owner="$(stat -c '%U' "${stale_dir}" 2>/dev/null)"
       if [ "${owner}" = "root" ]; then
-        if [ -t 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+        if [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
           printf "¿Borrar carpeta histórica con permisos root:root? [y/N] %s: " "${stale_dir}"
-          read -r REPLY || REPLY="n"
+          prompt_read REPLY "n" || true
         else
           REPLY="y"
         fi
@@ -1474,9 +1496,9 @@ if [ -n "${REPORT_PATH}" ]; then
   DEFAULT_REMOTE_PATH="/tmp/${REPORT_BASENAME}"
 
   if [ "${SEND_REPORT}" = "ask" ]; then
-    if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+    if [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
       printf "¿Enviar reporte ahora por scp/rsync? [s/N]: "
-      read -r REPLY || REPLY="n"
+      prompt_read REPLY "n" || true
       case "${REPLY}" in
         s|S|si|SI|sí|SÍ|y|Y|yes|YES) SEND_REPORT="yes" ;;
         *) SEND_REPORT="no" ;;
@@ -1488,9 +1510,9 @@ if [ -n "${REPORT_PATH}" ]; then
 
   if [ "${SEND_REPORT}" = "yes" ]; then
     if [ -z "${SEND_TARGET}" ]; then
-      if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+      if [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
         printf "Destino remoto [usuario@host:%s]: " "${DEFAULT_REMOTE_PATH}"
-        read -r SEND_TARGET || SEND_TARGET=""
+        prompt_read SEND_TARGET "" || true
         case "${SEND_TARGET}" in
           *@*:*) : ;;
           *@*) SEND_TARGET="${SEND_TARGET}:${DEFAULT_REMOTE_PATH}" ;;
