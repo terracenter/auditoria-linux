@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.17-1"
+SCRIPT_VERSION="2026.09.17-2"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -115,6 +115,95 @@ prompt_read() {
   fi
   printf -v "$__var" '%s' "$__default"
   return 1
+}
+
+report_sent_marker() {
+  local report_path="$1"
+  if [ -d "${report_path%/}" ]; then
+    printf '%s/.reporte-enviado' "${report_path%/}"
+  else
+    printf '%s.sent' "${report_path%/}"
+  fi
+}
+
+normalize_send_target() {
+  local target="$1"
+  local default_remote_path="$2"
+  case "${target}" in
+    *@*:*) printf '%s' "${target}" ;;
+    *@*) printf '%s:%s' "${target}" "${default_remote_path}" ;;
+    *) printf '%s' "${target}" ;;
+  esac
+}
+
+prompt_send_target() {
+  local __var="$1"
+  local default_remote_path="$2"
+  local value=""
+  printf "Destino remoto para el reporte:\n"
+  printf "  Enter = usuario@host:%s\n" "${default_remote_path}"
+  printf "  También puedes escribir solo usuario@host y se usará %s\n" "${default_remote_path}"
+  printf "Destino: "
+  prompt_read value "" || true
+  value="$(normalize_send_target "${value}" "${default_remote_path}")"
+  printf -v "$__var" '%s' "${value}"
+}
+
+send_report_file() {
+  local report_path="$1"
+  local send_target="$2"
+  local send_method="$3"
+  local report_basename
+  local default_remote_path
+  local marker
+  report_basename="$(basename "${report_path%/}")"
+  default_remote_path="/tmp/${report_basename}"
+
+  if [ -z "${send_target}" ] && [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
+    prompt_send_target send_target "${default_remote_path}"
+  fi
+  send_target="$(normalize_send_target "${send_target}" "${default_remote_path}")"
+
+  if [ -z "${send_target}" ]; then
+    warn "Envío solicitado, pero no se indicó destino remoto. Reporte local: ${report_path}"
+    return 1
+  fi
+
+  case "${send_method}" in
+    scp)
+      log "Enviando reporte por scp a ${send_target}"
+      if [ -d "${report_path%/}" ]; then
+        if scp -o StrictHostKeyChecking=accept-new -pr "${report_path%/}" "${send_target}"; then
+          ok "Reporte enviado por scp a ${send_target}"
+          marker="$(report_sent_marker "${report_path}")"
+          printf 'sent_at=%s\nmethod=scp\ntarget=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${send_target}" > "${marker}" 2>/dev/null || true
+          return 0
+        fi
+      elif scp -o StrictHostKeyChecking=accept-new -p "${report_path}" "${send_target}"; then
+        ok "Reporte enviado por scp a ${send_target}"
+        marker="$(report_sent_marker "${report_path}")"
+        printf 'sent_at=%s\nmethod=scp\ntarget=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${send_target}" > "${marker}" 2>/dev/null || true
+        return 0
+      fi
+      warn "Falló el envío por scp. Reporte local: ${report_path}"
+      return 1
+      ;;
+    rsync)
+      log "Enviando reporte por rsync a ${send_target}"
+      if rsync -e "ssh -o StrictHostKeyChecking=accept-new" --progress -razuz "${report_path}" "${send_target}"; then
+        ok "Reporte enviado por rsync a ${send_target}"
+        marker="$(report_sent_marker "${report_path}")"
+        printf 'sent_at=%s\nmethod=rsync\ntarget=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${send_target}" > "${marker}" 2>/dev/null || true
+        return 0
+      fi
+      warn "Falló el envío por rsync. Reporte local: ${report_path}"
+      return 1
+      ;;
+    *)
+      warn "Método de envío no soportado: ${send_method}. Usa scp o rsync. Reporte local: ${report_path}"
+      return 1
+      ;;
+  esac
 }
 
 # ---------- Help ----------
@@ -202,6 +291,23 @@ if [ -z "${OUT_DIR}" ]; then
   fi
 fi
 OUT_BASE="$(dirname "${OUT_DIR}")"
+
+# ---------- Auditorías previas pendientes de envío ----------
+if [ "${NO_CLEANUP}" -eq 0 ] && [ "${SEND_REPORT}" = "ask" ] && [ "${ASSUME_YES}" -eq 0 ] && [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ -d "${OUT_BASE}" ]; then
+  PENDING_REPORT="$(find "${OUT_BASE}" -maxdepth 1 -type f -name "auditoria-${HOST_NOMBRE}-*.tar.gz" ! -name "*.sent" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d ' ' -f 2-)"
+  if [ -z "${PENDING_REPORT}" ]; then
+    PENDING_REPORT="$(find "${OUT_BASE}" -maxdepth 1 -type d -name "auditoria-${HOST_NOMBRE}-*" ! -path "${OUT_DIR}" -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d ' ' -f 2-)"
+  fi
+  if [ -n "${PENDING_REPORT}" ] && [ ! -f "$(report_sent_marker "${PENDING_REPORT}")" ]; then
+    warn "Se detectó una auditoría previa sin marca de envío: ${PENDING_REPORT}"
+    printf "¿Enviar esa auditoría antes de iniciar una nueva? [s/N]: "
+    prompt_read REPLY "n" || true
+    case "${REPLY}" in
+      s|S|si|SI|sí|SÍ|y|Y|yes|YES) send_report_file "${PENDING_REPORT}" "" "${SEND_METHOD}" || true ;;
+      *) warn "No se envió la auditoría previa. Continúa la nueva ejecución." ;;
+    esac
+  fi
+fi
 
 # ---------- Pre-flight ----------
 if [ "$(id -u)" -ne 0 ]; then
@@ -1492,9 +1598,6 @@ elif [ -d "${OUT_DIR}" ]; then
 fi
 
 if [ -n "${REPORT_PATH}" ]; then
-  REPORT_BASENAME="$(basename "${REPORT_PATH%/}")"
-  DEFAULT_REMOTE_PATH="/tmp/${REPORT_BASENAME}"
-
   if [ "${SEND_REPORT}" = "ask" ]; then
     if [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
       printf "¿Enviar reporte ahora por scp/rsync? [s/N]: "
@@ -1509,49 +1612,7 @@ if [ -n "${REPORT_PATH}" ]; then
   fi
 
   if [ "${SEND_REPORT}" = "yes" ]; then
-    if [ -z "${SEND_TARGET}" ]; then
-      if [ "${HAVE_TTY_INPUT}" -eq 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
-        printf "Destino remoto [usuario@host:%s]: " "${DEFAULT_REMOTE_PATH}"
-        prompt_read SEND_TARGET "" || true
-        case "${SEND_TARGET}" in
-          *@*:*) : ;;
-          *@*) SEND_TARGET="${SEND_TARGET}:${DEFAULT_REMOTE_PATH}" ;;
-        esac
-      fi
-    fi
-
-    if [ -z "${SEND_TARGET}" ]; then
-      warn "Envío solicitado, pero no se indicó destino remoto. Reporte local: ${REPORT_PATH}"
-    else
-      case "${SEND_TARGET}" in
-        *@*:*) : ;;
-        *@*) SEND_TARGET="${SEND_TARGET}:${DEFAULT_REMOTE_PATH}" ;;
-      esac
-
-      SSH_SEND_OPTS=(-o StrictHostKeyChecking=accept-new)
-
-      case "${SEND_METHOD}" in
-        scp)
-          log "Enviando reporte por scp a ${SEND_TARGET}"
-          if scp "${SSH_SEND_OPTS[@]}" -p "${REPORT_PATH}" "${SEND_TARGET}"; then
-            ok "Reporte enviado por scp a ${SEND_TARGET}"
-          else
-            warn "Falló el envío por scp. Reporte local: ${REPORT_PATH}"
-          fi
-          ;;
-        rsync)
-          log "Enviando reporte por rsync a ${SEND_TARGET}"
-          if rsync -e "ssh -o StrictHostKeyChecking=accept-new" --progress -razuz "${REPORT_PATH}" "${SEND_TARGET}"; then
-            ok "Reporte enviado por rsync a ${SEND_TARGET}"
-          else
-            warn "Falló el envío por rsync. Reporte local: ${REPORT_PATH}"
-          fi
-          ;;
-        *)
-          warn "Método de envío no soportado: ${SEND_METHOD}. Usa scp o rsync. Reporte local: ${REPORT_PATH}"
-          ;;
-      esac
-    fi
+    send_report_file "${REPORT_PATH}" "${SEND_TARGET}" "${SEND_METHOD}" || true
   fi
 fi
 
