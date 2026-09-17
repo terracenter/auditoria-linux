@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-8"
+SCRIPT_VERSION="2026.09.16-9"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -1261,7 +1261,12 @@ else
     lynis_update_info > "${LYNIS_UPDATE_INFO_BEFORE}"
     LYNIS_STATUS_BEFORE="$(lynis_update_status_from_file "${LYNIS_UPDATE_INFO_BEFORE}")"
 
-    log "Lynis instalado: ${LYNIS_VERSION_BEFORE:-version no detectada}. Estado upstream: ${LYNIS_STATUS_BEFORE:-no detectado}. Validando actualización via ${PKG_MGR}."
+    if [ -n "${LYNIS_STATUS_BEFORE}" ]; then
+      log "Lynis instalado: ${LYNIS_VERSION_BEFORE:-versión no detectada}. Estado upstream antes de actualizar: ${LYNIS_STATUS_BEFORE}."
+    else
+      warn "Lynis instalado: ${LYNIS_VERSION_BEFORE:-versión no detectada}. No se pudo determinar el estado upstream antes de actualizar; se guardó la evidencia en ${LYNIS_UPDATE_INFO_BEFORE}."
+    fi
+    log "Validando si el gestor de paquetes (${PKG_MGR}) ofrece una actualización de Lynis."
     if update_installed_package lynis; then
       ok "Lynis validado/actualizado via gestor de paquetes."
     else
