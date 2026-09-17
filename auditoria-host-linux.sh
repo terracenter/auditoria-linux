@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.16-7"
+SCRIPT_VERSION="2026.09.16-8"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -172,7 +172,7 @@ if [ -z "${OUT_DIR}" ]; then
   DEFAULT_OUT="${INVOKER_HOME}/auditoria-${HOST_NOMBRE}-${FECHA}-${HORA}"
   if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
     printf "Directorio de salida [Enter = %s]: " "${DEFAULT_OUT}"
-    read -r REPLY </dev/tty 2>/dev/null || REPLY="${DEFAULT_OUT}"
+    read -r REPLY || REPLY="${DEFAULT_OUT}"
     [ -z "${REPLY}" ] && REPLY="${DEFAULT_OUT}"
     OUT_DIR="${REPLY}"
   else
@@ -208,7 +208,7 @@ if [ "${NO_CLEANUP}" -eq 0 ] && [ -n "${INVOKER_USER}" ] && [ "${INVOKER_USER}" 
       if [ "${owner}" = "root" ]; then
         if [ -t 1 ] && [ "${ASSUME_YES}" -eq 0 ]; then
           printf "¿Borrar carpeta histórica con permisos root:root? [y/N] %s: " "${stale_dir}"
-          read -r REPLY </dev/tty 2>/dev/null || REPLY="n"
+          read -r REPLY || REPLY="n"
         else
           REPLY="y"
         fi
@@ -1442,6 +1442,20 @@ if [ "${KEEP_TREE}" -eq 1 ] && [ -d "${OUT_DIR}" ]; then
   ok "📁 Carpeta cruda (conservada por --keep-tree): ${OUT_DIR}"
 fi
 
+section "Recomendaciones / tareas detectadas"
+FOUND_RECOMMENDATIONS=0
+if [ -f "${OUT_DIR}/actualizaciones/debian-release-recomendacion.md" ]; then
+  warn "Revisión Debian: ${OUT_DIR}/actualizaciones/debian-release-recomendacion.md"
+  FOUND_RECOMMENDATIONS=1
+fi
+if [ -f "${OUT_DIR}/lynis/lynis-upstream-recomendacion.md" ]; then
+  warn "Revisión Lynis upstream: ${OUT_DIR}/lynis/lynis-upstream-recomendacion.md"
+  FOUND_RECOMMENDATIONS=1
+fi
+if [ "${FOUND_RECOMMENDATIONS}" -eq 0 ]; then
+  ok "Sin recomendaciones automáticas adicionales."
+fi
+
 # ---------- Envío opcional del reporte ----------
 REPORT_PATH=""
 if [ -n "${TAR_PATH}" ]; then
@@ -1457,7 +1471,7 @@ if [ -n "${REPORT_PATH}" ]; then
   if [ "${SEND_REPORT}" = "ask" ]; then
     if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
       printf "¿Enviar reporte ahora por scp/rsync? [s/N]: "
-      read -r REPLY </dev/tty 2>/dev/null || REPLY="n"
+      read -r REPLY || REPLY="n"
       case "${REPLY}" in
         s|S|si|SI|sí|SÍ|y|Y|yes|YES) SEND_REPORT="yes" ;;
         *) SEND_REPORT="no" ;;
@@ -1471,7 +1485,7 @@ if [ -n "${REPORT_PATH}" ]; then
     if [ -z "${SEND_TARGET}" ]; then
       if [ -t 0 ] && [ "${ASSUME_YES}" -eq 0 ]; then
         printf "Destino remoto [usuario@host:%s]: " "${DEFAULT_REMOTE_PATH}"
-        read -r SEND_TARGET </dev/tty 2>/dev/null || SEND_TARGET=""
+        read -r SEND_TARGET || SEND_TARGET=""
         case "${SEND_TARGET}" in
           *@*:*) : ;;
           *@*) SEND_TARGET="${SEND_TARGET}:${DEFAULT_REMOTE_PATH}" ;;
