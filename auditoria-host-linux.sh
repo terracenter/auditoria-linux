@@ -54,7 +54,7 @@ set -o pipefail
 
 # ---------- Defaults ----------
 SCRIPT_NAME="auditoria-host-linux.sh"
-SCRIPT_VERSION="2026.09.17-3"
+SCRIPT_VERSION="2026.09.17-4"
 CLIENTE="propio"
 ROL="other"
 HOST_NOMBRE="$(hostname 2>/dev/null || echo unknown)"
@@ -1117,6 +1117,81 @@ ok "Fase 2 completa."
 # ============================================================================
 section "FASE 3 — Red y firewall"
 OUT03="${OUT_DIR}/red-firewall"
+FW_SNAP="${OUT_DIR}/snapshots-config/firewall"
+mkdir -p "${FW_SNAP}"
+
+# Evidencia completa de firewall/red para poder validar migraciones posteriores
+# (nftables, UFW, iptables-nft/legacy, forwarding y puertos) sin volver a
+# recolectar estado manualmente antes de cada tarea.
+{
+  echo "## Task 3.0 — Evidencia completa previa de red/firewall"; echo
+  echo "Generado: $(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo
+  echo "### Identidad"; echo '```bash'
+  echo "$ hostname -f"; hostname -f 2>/dev/null || hostname 2>/dev/null || true
+  echo "$ date -Is"; date -Is 2>/dev/null || date
+  echo '```'; echo
+
+  echo "### Interfaces"; echo '```bash'
+  echo "$ ip -br addr"; ip -br addr 2>&1 || true
+  echo '```'; echo
+
+  echo "### Rutas"; echo '```bash'
+  echo "$ ip route"; ip route 2>&1 || true
+  echo '```'; echo
+
+  echo "### Forwarding IPv4"; echo '```bash'
+  echo "$ cat /proc/sys/net/ipv4/ip_forward"; cat /proc/sys/net/ipv4/ip_forward 2>&1 || true
+  echo "$ sysctl net.ipv4.ip_forward"; { command -v sysctl >/dev/null 2>&1 && sysctl net.ipv4.ip_forward; } 2>&1 || \
+    { [ -x /sbin/sysctl ] && /sbin/sysctl net.ipv4.ip_forward; } 2>&1 || \
+    { [ -x /usr/sbin/sysctl ] && /usr/sbin/sysctl net.ipv4.ip_forward; } 2>&1 || true
+  echo '```'; echo
+
+  echo "### Servicios firewall"; echo '```bash'
+  for svc in nftables ufw fail2ban; do
+    echo "$ systemctl is-active ${svc}"; systemctl is-active "${svc}" 2>&1 || true
+    echo "$ systemctl is-enabled ${svc}"; systemctl is-enabled "${svc}" 2>&1 || true
+    echo
+  done
+  echo '```'; echo
+
+  echo "### Puertos escuchando"; echo '```bash'
+  echo "$ ss -tulpen"; ss -tulpen 2>&1 || true
+  echo '```'
+} > "${OUT03}/00.evidencia-previa-red-firewall.md"
+
+{
+  echo "## Task 3.0.1 — Backups de reglas firewall dentro del reporte"; echo
+  echo "Directorio: \`${FW_SNAP}\`"; echo
+  echo '```bash'
+  if command -v nft >/dev/null 2>&1; then
+    nft list ruleset > "${FW_SNAP}/nft-ruleset.before.nft" 2>"${FW_SNAP}/nft-ruleset.before.err" || true
+    echo "$ nft list ruleset > ${FW_SNAP}/nft-ruleset.before.nft"
+  else
+    echo "nft no instalado"
+  fi
+  if command -v iptables-save >/dev/null 2>&1; then
+    iptables-save > "${FW_SNAP}/iptables-save.before.rules" 2>"${FW_SNAP}/iptables-save.before.err" || true
+    echo "$ iptables-save > ${FW_SNAP}/iptables-save.before.rules"
+  else
+    echo "iptables-save no instalado"
+  fi
+  if command -v ip6tables-save >/dev/null 2>&1; then
+    ip6tables-save > "${FW_SNAP}/ip6tables-save.before.rules" 2>"${FW_SNAP}/ip6tables-save.before.err" || true
+    echo "$ ip6tables-save > ${FW_SNAP}/ip6tables-save.before.rules"
+  else
+    echo "ip6tables-save no instalado"
+  fi
+  if command -v ufw >/dev/null 2>&1; then
+    ufw status verbose > "${FW_SNAP}/ufw-status.before.txt" 2>"${FW_SNAP}/ufw-status.before.err" || true
+    ufw status numbered > "${FW_SNAP}/ufw-status-numbered.before.txt" 2>>"${FW_SNAP}/ufw-status.before.err" || true
+    echo "$ ufw status verbose > ${FW_SNAP}/ufw-status.before.txt"
+    echo "$ ufw status numbered > ${FW_SNAP}/ufw-status-numbered.before.txt"
+  else
+    echo "ufw no instalado"
+  fi
+  ls -lh "${FW_SNAP}" 2>&1 || true
+  echo '```'
+} > "${OUT03}/01.backup-reglas-firewall.md"
 
 {
   echo "## Task 3.1 — Listeners (excluyendo Docker)"; echo
@@ -1134,11 +1209,11 @@ OUT03="${OUT_DIR}/red-firewall"
   echo
   echo "$ ufw status numbered"; ufw status numbered 2>&1
   echo
-  echo "$ iptables -S"; iptables -S 2>&1 | head -80
+  echo "$ iptables -S"; iptables -S 2>&1 | tee "${FW_SNAP}/iptables-S.before.txt" | head -80
   echo
-  echo "$ iptables -L -n"; iptables -L -n 2>&1 | head -80
+  echo "$ iptables -L -n"; iptables -L -n 2>&1 | tee "${FW_SNAP}/iptables-L-n.before.txt" | head -80
   echo
-  echo "$ nft list ruleset (si aplica)"; nft list ruleset 2>&1 | head -80
+  echo "$ nft list ruleset (completo guardado en snapshots-config/firewall/nft-ruleset.before.nft; extracto abajo)"; nft list ruleset 2>&1 | head -80
   echo '```'
 } > "${OUT03}/firewall.md"
 
@@ -1506,7 +1581,7 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 | 0 — Checklist operacional | \`fase-00-checklist-*.md\` | $([ -s "${OUT_DIR}/fase-00-checklist-resultados.md" ] && echo "OK" || echo "FALTA") |
 | 1 — Inventario | \`postura-general/\` | OK |
 | 2 — Acceso/auth | \`acceso-autenticacion/\` | OK |
-| 3 — Red/firewall | \`red-firewall/\` | OK |
+| 3 — Red/firewall | \`red-firewall/\` + \`snapshots-config/firewall/\` | OK — incluye evidencia completa para validar nftables/UFW/iptables, forwarding, rutas, listeners y backups de reglas |
 | 4 — Logs/monitoreo | \`logs-monitoreo/\` | OK |
 | 5 — Updates | \`actualizaciones/\` | OK |
 | 6 — Backups | \`backups/\` | OK |
