@@ -23,13 +23,24 @@ basado en la plantilla en `Obsidian/Planes/_templates/auditoria-host-linux.md`.
 
 ```bash
 # Copiar al host destino y ejecutar como root
-scp auditoria-host-linux.sh usuario@host:/tmp/
+scp auditoria-linux auditoria-host-linux.sh usuario@host:/tmp/
 ssh usuario@host
-sudo bash /tmp/auditoria-host-linux.sh
+sudo bash /tmp/auditoria-linux --cliente Fibex --rol freeipa-server --skip-lynis -y
 
 # Resultado queda en $HOME del host:
 #   ~/auditoria-<hostname>-<YYYY-MM-DD>-<HHMMSSZ>.tar.gz
 ```
+
+## Detección Freddy incluida
+
+Además de la plantilla general, el script detecta automáticamente si el host tiene:
+
+- FreeIPA/SSSD/Kerberos (`/etc/ipa/default.conf`, `sssd`, `ipa`, `klist`, hostgroups si hay ticket vigente).
+- Tailscale (`tailscaled`, IP `100.x`, prefs como `CorpDNS`/`AcceptDNS`, rutas `tailscale0`).
+- DNS/SRV FreeIPA local para comparar antes/después de Tailscale.
+- Zabbix Agent 2, GLPI Agent y Docker.
+
+Esto permite que Freddy suba un solo `.tar.gz` por SCP y el agente actualice el vault sin copiar/pegar comando por comando.
 
 ## Procedimiento completo (laptop → le → vault)
 

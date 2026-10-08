@@ -14,6 +14,7 @@
 #   5 — Actualizaciones y paquetes
 #   6 — Backups del host
 #   7 — Lynis (herramienta externa)
+#   Extra — Detección Freddy: FreeIPA/SSSD, Tailscale, Zabbix, GLPI, Docker
 #
 # Uso:
 #   sudo ./auditoria-host-linux.sh [OPCIONES]
@@ -369,7 +370,7 @@ if [ "${NO_CLEANUP}" -eq 0 ] && [ -n "${INVOKER_USER}" ] && [ "${INVOKER_USER}" 
   fi
 fi
 
-mkdir -p "${OUT_DIR}"/{logs,postura-general,acceso-autenticacion,red-firewall,logs-monitoreo,actualizaciones,backups,lynis,snapshots-config}
+mkdir -p "${OUT_DIR}"/{logs,postura-general,acceso-autenticacion,red-firewall,logs-monitoreo,actualizaciones,backups,lynis,snapshots-config,freeipa-tailscale}
 exec > >(tee -a "${OUT_DIR}/logs/consolidated.log") 2>&1
 
 log "Inicio: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1110,6 +1111,28 @@ done
   echo '```'
 } > "${OUT02}/pam-policy.md"
 
+
+{
+  echo "## Task 2.6 — FreeIPA / SSSD / Kerberos (detección Freddy)"; echo
+  echo '```bash'
+  echo "$ /etc/ipa/default.conf"; cat /etc/ipa/default.conf 2>/dev/null || echo "standalone — no enrolado en FreeIPA"
+  echo
+  echo "$ systemctl is-active sssd ipa"; systemctl is-active sssd ipa 2>&1 || true
+  echo
+  echo "$ ipa server-find (si hay credenciales Kerberos vigentes)"; ipa server-find 2>&1 || true
+  echo
+  echo "$ ipa host-show $(hostname -f 2>/dev/null || hostname)"; ipa host-show "$(hostname -f 2>/dev/null || hostname)" 2>&1 || true
+  echo
+  echo "$ ipa hostgroup-find --host=$(hostname -f 2>/dev/null || hostname)"; ipa hostgroup-find --host="$(hostname -f 2>/dev/null || hostname)" 2>&1 || true
+  echo
+  echo "$ klist"; klist 2>&1 || true
+  echo
+  echo "$ sssctl domain-list"; sssctl domain-list 2>&1 || true
+  echo
+  echo "$ sssctl domain-status --all"; sssctl domain-status --all 2>&1 || true
+  echo '```'
+} > "${OUT02}/freeipa-sssd.md"
+
 ok "Fase 2 completa."
 
 # ============================================================================
@@ -1254,6 +1277,43 @@ mkdir -p "${FW_SNAP}"
   echo "$ ip route"; ip route 2>/dev/null
   echo '```'
 } > "${OUT03}/netplan.md"
+
+
+{
+  echo "## Task 3.5 — Tailscale / overlay VPN (detección Freddy)"; echo
+  echo '```bash'
+  echo "$ command -v tailscale"; command -v tailscale 2>/dev/null || echo "tailscale no instalado"
+  echo
+  echo "$ systemctl is-active tailscaled"; systemctl is-active tailscaled 2>&1 || true
+  echo
+  echo "$ tailscale version"; tailscale version 2>&1 || true
+  echo
+  echo "$ tailscale status"; tailscale status 2>&1 || true
+  echo
+  echo "$ tailscale ip -4"; tailscale ip -4 2>&1 || true
+  echo
+  echo "$ tailscale debug prefs"; tailscale debug prefs 2>&1 || true
+  echo
+  echo "$ ip -br addr show tailscale0"; ip -br addr show tailscale0 2>&1 || true
+  echo
+  echo "$ ip route show table all | grep tailscale"; ip route show table all 2>/dev/null | grep -i tailscale || true
+  echo '```'
+} > "${OUT03}/tailscale.md"
+
+{
+  echo "## Task 3.6 — FreeIPA DNS/SRV local para pre/post Tailscale"; echo
+  echo '```bash'
+  domain="$(awk -F'= ' '/^domain =/ {print $2; exit}' /etc/ipa/default.conf 2>/dev/null || true)"
+  [ -z "$domain" ] && domain="$(hostname -d 2>/dev/null || true)"
+  echo "Dominio detectado: ${domain:-desconocido}"
+  if [ -n "$domain" ]; then
+    echo "$ dig @127.0.0.1 $(hostname -f)"; dig @127.0.0.1 "$(hostname -f)" 2>&1 || true
+    echo "$ dig @127.0.0.1 _ldap._tcp.${domain} SRV"; dig @127.0.0.1 "_ldap._tcp.${domain}" SRV 2>&1 || true
+    echo "$ dig @127.0.0.1 _kerberos._tcp.${domain} SRV"; dig @127.0.0.1 "_kerberos._tcp.${domain}" SRV 2>&1 || true
+    echo "$ dig @127.0.0.1 _kerberos._udp.${domain} SRV"; dig @127.0.0.1 "_kerberos._udp.${domain}" SRV 2>&1 || true
+  fi
+  echo '```'
+} > "${OUT03}/freeipa-dns-srv.md"
 
 ok "Fase 3 completa."
 
@@ -1574,6 +1634,17 @@ cat > "${OUT_DIR}/RESUMEN-EJECUTIVO.md" <<EOF
 - chrony/timesyncd:   $(_chrony)
 - unattended-upgrades: $(_h2b unattended-upgrade)
 - lynis:              $([ "${LYNIS_OK}" -eq 1 ] && echo "INSTALADO+EJECUTADO" || echo "NO EJECUTADO")
+
+
+## Detección Freddy (automatizada)
+- FreeIPA config:      $([ -f /etc/ipa/default.conf ] && echo "SI" || echo "NO")
+- SSSD:                $(systemctl is-active sssd 2>/dev/null || echo "no-detectado")
+- Servicio IPA server: $(systemctl is-active ipa 2>/dev/null || echo "no-detectado")
+- Tailscale:           $(command -v tailscale >/dev/null 2>&1 && echo "INSTALADO" || echo "NO")
+- tailscaled:          $(systemctl is-active tailscaled 2>/dev/null || echo "no-detectado")
+- Zabbix agent2:       $(systemctl is-active zabbix-agent2 2>/dev/null || echo "no-detectado")
+- GLPI agent:          $(systemctl is-active glpi-agent 2>/dev/null || echo "no-detectado")
+- Docker:              $(command -v docker >/dev/null 2>&1 && echo "INSTALADO" || echo "NO")
 
 ## Estado de las fases
 | Fase | Archivo | Estado |

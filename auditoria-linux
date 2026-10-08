@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Wrapper canónico solicitado por Freddy.
+# Ejecuta la auditoría Linux basada en la plantilla operativa del workspace.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec bash "${SCRIPT_DIR}/auditoria-host-linux.sh" "$@"
