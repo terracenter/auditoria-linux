@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.7.0-paso7"
+VERSION="0.8.0-paso8"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -479,7 +479,7 @@ paso_07_lynis() {
   # Ejecución (solo lectura; logs y reporte en la evidencia)
   local rep="$EVID/lynis-report.dat" lg="$EVID/lynis.log"
   ( cd "$ly" && ./lynis audit system --no-colors --quiet --profile "$ly/default.prf" \
-      --logfile "$lg" --report-file "$rep" ) >"$EVID/07-lynis-stdout.txt" 2>&1
+      --logfile "$lg" --report-file "$rep" ) </dev/null >"$EVID/07-lynis-stdout.txt" 2>&1
   local rc=$?; printf 'lynis rc=%s\n' "$rc" >>"$f"
   if [ ! -s "$rep" ]; then chk "ejecución de Lynis" FAIL "sin reporte (rc=$rc): ver 07-lynis-stdout.txt"
   else
@@ -499,11 +499,20 @@ paso_07_lynis() {
   say "Paso 7 listo → $f"; cat "$r"
 }
 paso_08_empaquetar() {
-  local tgz="$OUT_BASE/auditoria-root-${HOST}-${TS}.tar.gz"
-  tar -C "$OUT_BASE" -czf "$tgz" "$(basename "$EVID")" || { say "Falló tar"; return 1; }
+  local tgz="$OUT_BASE/auditoria-root-${HOST}-${TS}.tar.gz" i faltan=""
+  for i in 1 2 3 4 5 6 7; do [ "${ESTADO[$i]:-pendiente}" = ok ] || faltan="$faltan $i"; done
+  { printf 'script=%s\nversion=%s\nhost=%s\nfecha=%s\npasos_sin_ejecutar=%s\n' \
+      "$(basename "$0")" "$VERSION" "$HOST" "$TS" "${faltan:-ninguno}"
+    printf 'sha256_script=%s\n' "$(sha256sum "$0" 2>/dev/null | cut -d' ' -f1)"; } >"$EVID/MANIFEST.txt"
+  [ -n "$faltan" ] && say "AVISO: pasos sin ejecutar en este paquete:$faltan"
+  # Se excluye el Lynis extraído (reproducible desde vendor/) y el keyring GPG temporal.
+  tar -C "$OUT_BASE" --exclude="$(basename "$EVID")/lynis-run" --exclude="$(basename "$EVID")/.gnupg" \
+      -czf "$tgz" "$(basename "$EVID")" || { say "Falló tar"; return 1; }
+  chmod 600 "$tgz"   # contiene hashes, usuarios y reglas: solo root
   ( cd "$OUT_BASE" && sha256sum "$(basename "$tgz")" ) | tee "$tgz.sha256"
   ESTADO[8]="ok"
   say "Paquete: $tgz"
+  say "Para copiarlo: sudo chown \$USER '$tgz' && scp ... (contiene datos sensibles del host)"
 }
 
 NOMBRES=(
