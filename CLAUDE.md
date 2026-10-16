@@ -13,7 +13,7 @@ Herramientas: `auditoria-root-acceso.sh` (seguridad básica, CIS L2) y `auditori
 - Los scripts son **solo lectura**: no instalan, no modifican configuración, no tocan la red. Cualquier excepción se declara en la cabecera del script.
 - No commitear paquetes de evidencia (`auditoria-*.tar.gz`, `auditoria-*/`): contienen configuración de hosts. Ya están en `.gitignore`.
 - Al actualizar Lynis, cambiar a la vez el tarball, `SHA256SUMS`, y el nombre/SHA256/huella fijados en el paso 7 del script, y verificar la huella contra CISOfy.
-- Todo cambio relevante actualiza `CHANGELOG.md` y la documentación viva en el vault:
-  - Plan y logs: `/home/freddy/Workspace/Obsidian/09.Planes/04.auditoria-linux/`
-  - Manual operativo: `/home/freddy/Workspace/Obsidian/04.Documentacion/05.Seguridad/Auditoria/`
+- Todo cambio relevante actualiza `CHANGELOG.md` y la documentación viva en el vault, en
+  `/home/freddy/Workspace/Obsidian/04.Documentacion/05.Seguridad/Auditoria/` (manual operativo `10.*`, ROADMAP `90.*`,
+  task log `91.*`, development log `92.*`).
 - Lo no validado con evidencia real se marca `[D]`; nada se inventa.
