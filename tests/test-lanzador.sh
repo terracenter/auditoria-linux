@@ -32,17 +32,18 @@ echo "ssh $*" >>"$FAKE_LOG"
 [ "${FAKE_SSH_FAIL:-0}" = 1 ] && exit 255
 while [ $# -gt 0 ]; do case "$1" in -o) shift 2;; -O|-MNf) exit 0;; -t|-q) shift;; *) break;; esac; done
 shift
-HOME="$FAKEHOME" bash -c "$*"
+cd "$FAKEHOME" && HOME="$FAKEHOME" bash -c "$*"
 EOF
 cat >"$T/fb/scp" <<'EOF'
 #!/bin/bash
 echo "scp $*" >>"$FAKE_LOG"
 args=(); while [ $# -gt 0 ]; do case "$1" in -o) shift 2;; -q|-r) shift;; *) args+=("$1"); shift;; esac; done
 n=${#args[@]}; dest="${args[$((n-1))]}"
+[ "${FAKE_E_FAIL:-0}" = 1 ] && case "$dest" in entrega@*) exit 1;; esac
 map() { case "$1" in *:*) echo "$FAKEHOME/${1#*:}";; *) echo "$1";; esac; }
 d="$(map "$dest")"; mkdir -p "$d"
 for ((i=0;i<n-1;i++)); do cp -r "$(map "${args[$i]}")" "$d/"; done
-if [ "${FAKE_CORRUPT:-0}" = 1 ]; then for f in "$d"/*.tar.gz; do [ -f "$f" ] && echo x >>"$f"; done; fi
+if [ "${FAKE_CORRUPT:-0}" = 1 ] || { [ "${FAKE_E_CORRUPT:-0}" = 1 ] && case "$dest" in entrega@*) true;; *) false;; esac; }; then for f in "$d"/*.tar.gz; do [ -f "$f" ] && echo x >>"$f"; done; fi
 exit 0
 EOF
 cat >"$T/fb/sudo" <<'EOF'
@@ -61,34 +62,51 @@ lanza() {
 }
 LANZ="$T/repo/auditar-host.sh"
 
-# 1. camino feliz, responde s: OK, paquete en destino con 600, host limpiado
-rm -f "$T/dest/"*; lanza s "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
+# 1. camino feliz: OK, paquete en destino con 600, host limpiado sin preguntar nada
+rm -f "$T/dest/"*; lanza "" "$LANZ" -d "$T/dest" u@10.0.0.9 </dev/null; rc=$?
 check "feliz: exit 0" "[ $rc -eq 0 ]"
 check "feliz: RESULTADO OK" "grep -q 'RESULTADO: OK' '$T/out'"
 check "feliz: paquete y sha256 en destino" "ls '$T/dest'/auditoria-root-*.tar.gz '$T/dest'/auditoria-root-*.sha256 >/dev/null 2>&1"
 check "feliz: permisos 600" "[ \"\$(stat -c %a '$T/dest'/auditoria-root-*.tar.gz)\" = 600 ]"
 check "feliz: muestra POLITICA_FIBEX" "grep -q POLITICA_FIBEX '$T/out'"
-check "feliz (s): borra ~/auditoria del host" "[ ! -d '$T/home/auditoria' ]"
+check "feliz: limpia el host sin preguntar" "[ ! -d '$T/home/auditoria' ] && grep -q 'Host limpio' '$T/out' && ! grep -q '\[s/N\]' '$T/out'"
+check "feliz: no envía a ningún DESTINO" "! grep -q 'entrega@' '$T/log'"
 
-# 2. responde n: se conserva
-rm -f "$T/dest/"*; lanza n "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
-check "responde n: exit 0 y host conserva ~/auditoria" "[ $rc -eq 0 ] && [ -d '$T/home/auditoria' ]"
+# 2. la limpieza no borra lo que no es del lanzador
+rm -f "$T/dest/"*; mkdir -p "$T/home/auditoria"; echo ajeno >"$T/home/auditoria/ajeno.txt"
+: >"$T/log"; env PATH="$T/fb:$PATH" FAKEHOME="$T/home" FAKE_LOG="$T/log" "$LANZ" -d "$T/dest" u@10.0.0.9 >"$T/out" 2>&1 </dev/null; rc=$?
+check "limpieza: conserva archivos ajenos en ~/auditoria" "[ $rc -eq 0 ] && [ -f '$T/home/auditoria/ajeno.txt' ] && [ ! -e '$T/home/auditoria/vendor' ]"
 
-# 3. sin respuesta (stdin vacío): no borra
-rm -f "$T/dest/"*; lanza "" "$LANZ" -d "$T/dest" u@10.0.0.9 </dev/null; rc=$?
-check "stdin vacío: exit 0 y no borra" "[ $rc -eq 0 ] && [ -d '$T/home/auditoria' ]"
+# 3. con -e: entrega verificada y luego limpia
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza "" "$LANZ" -d "$T/dest" -e entrega@srv:entrega u@10.0.0.9 </dev/null; rc=$?
+check "-e: exit 0, llega al destino y limpia el host" "[ $rc -eq 0 ] && ls '$T/home/entrega'/auditoria-root-*.tar.gz >/dev/null 2>&1 && [ ! -d '$T/home/auditoria' ] && grep -q 'Entregado y verificado' '$T/out'"
 
-# 4. paquete corrupto en la descarga: FALLO, exit 1, no pide entregar
-rm -f "$T/dest/"*; lanza n env FAKE_CORRUPT=1 "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
+# 4. -e falla al enviar: FALLO, exit 1, el host NO se limpia
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza "" env FAKE_E_FAIL=1 "$LANZ" -d "$T/dest" -e entrega@srv:entrega u@10.0.0.9 </dev/null; rc=$?
+check "-e falla: exit 1, RESULTADO FALLO y host intacto" "[ $rc -eq 1 ] && grep -q 'RESULTADO: FALLO' '$T/out' && [ -d '$T/home/auditoria/vendor' ]"
+
+# 5. -e llega corrupto: FALLO y host intacto
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza "" env FAKE_E_CORRUPT=1 "$LANZ" -d "$T/dest" -e entrega@srv:entrega u@10.0.0.9 </dev/null; rc=$?
+check "-e corrupto: exit 1 y host intacto" "[ $rc -eq 1 ] && grep -q 'no se pudo enviar o verificar' '$T/out' && [ -d '$T/home/auditoria/vendor' ]"
+
+# 6. -e inválido: rechaza SIN llamar a ssh/scp
+for e in '-oProxyCommand=x:/t' 'sin-dos-puntos' 'a b@h:/t' 'u@h:/t;rm' 'u@h:$(id)'; do
+  lanza "" "$LANZ" -d "$T/dest" -e "$e" u@10.0.0.9 </dev/null; rc=$?
+  check "-e inválido '$e': exit != 0 y sin llamadas a ssh/scp" "[ $rc -ne 0 ] && [ ! -s '$T/log' ]"
+done
+
+# 7. paquete corrupto en la descarga: FALLO, exit 1, host intacto, no se envía
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza "" env FAKE_CORRUPT=1 "$LANZ" -d "$T/dest" -e entrega@srv:entrega u@10.0.0.9 </dev/null; rc=$?
 check "corrupto: exit 1 y RESULTADO FALLO" "[ $rc -eq 1 ] && grep -q 'RESULTADO: FALLO' '$T/out'"
 check "corrupto: no dice 'Entrégalo'" "! grep -q 'Entrégalo' '$T/out'"
 check "corrupto: avisa SHA256" "grep -q 'SHA256 no coincide' '$T/out'"
+check "corrupto: host intacto y no envía a -e" "[ -d '$T/home/auditoria/vendor' ] && [ ! -d '$T/home/entrega' ]"
 
-# 5. pasos sin ejecutar
-rm -f "$T/dest/"*; lanza n env STUB_FALTAN=7 "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
-check "pasos sin ejecutar: exit 1 y lo dice" "[ $rc -eq 1 ] && grep -q 'pasos sin ejecutar: 7' '$T/out'"
+# 8. pasos sin ejecutar: host intacto
+rm -f "$T/dest/"*; lanza "" env STUB_FALTAN=7 "$LANZ" -d "$T/dest" u@10.0.0.9 </dev/null; rc=$?
+check "pasos sin ejecutar: exit 1, lo dice y host intacto" "[ $rc -eq 1 ] && grep -q 'pasos sin ejecutar: 7' '$T/out' && [ -d '$T/home/auditoria/vendor' ]"
 
-# 6. destinos inválidos: rechaza SIN llamar a ssh/scp
+# 9. destinos inválidos: rechaza SIN llamar a ssh/scp
 for t in '-oProxyCommand=x' 'a b;rm' 'u@h$(id)' ''; do
   lanza "" "$LANZ" -d "$T/dest" "$t"; rc=$?
   check "destino inválido '$t': exit != 0 y sin llamadas a ssh/scp" "[ $rc -ne 0 ] && [ ! -s '$T/log' ]"
@@ -96,12 +114,12 @@ done
 lanza "" "$LANZ" -d "$T/dest"; rc=$?
 check "sin argumentos: exit 2" "[ $rc -eq 2 ]"
 
-# 7. SSH no conecta
+# 10. SSH no conecta
 lanza "" env FAKE_SSH_FAIL=1 "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
 check "ssh falla: exit 1 y mensaje claro" "[ $rc -eq 1 ] && grep -q 'no pude conectar' '$T/out'"
 check "ssh falla: no llama a scp" "! grep -q '^scp' '$T/log'"
 
-# 8. sin vendor/lynis, destino inexistente
+# 11. sin vendor/lynis, destino inexistente
 rm -rf "$T/repo/vendor/lynis"; lanza "" "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
 check "sin vendor/lynis: exit 1 y sin llamadas" "[ $rc -eq 1 ] && [ ! -s '$T/log' ]"
 mkdir -p "$T/repo/vendor/lynis"

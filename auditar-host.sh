@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 # auditar-host.sh — lanzador: audita un host remoto con auditoria-root-acceso.sh en un solo comando.
-# Uso: ./auditar-host.sh [-d DIR] [usuario@]host-o-ip
-#   -d DIR  carpeta local donde dejar el paquete (por defecto, la carpeta actual)
+# Uso: ./auditar-host.sh [-d DIR] [-e DESTINO] [usuario@]host-o-ip
+#   -d DIR      carpeta local donde dejar el paquete (por defecto, la carpeta actual)
+#   -e DESTINO  además, envía el paquete por scp a DESTINO (usuario@servidor:ruta)
 # Corre en TU equipo, no en el host. Copia el script y vendor/, lo ejecuta por SSH con el
 # sudo de TU usuario (te pedirá su contraseña), trae el .tar.gz, verifica el SHA256 y
 # comprueba que los 8 pasos se ejecutaron. No guarda contraseñas ni llaves.
-# En el host solo escribe en ~/auditoria/ (y lo que la auditoría ya crea); nada se borra
-# sin tu confirmación.
+# En el host solo escribe en ~/auditoria/. Si el paquete llegó verificado a tu equipo (y a
+# DESTINO, si lo diste), borra del host lo que el lanzador copió y generó; si algo falla, no borra nada.
 set -u
 set -o pipefail
 
-LANZADOR_VERSION="0.1.0"
+LANZADOR_VERSION="0.2.0"
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$AQUI/auditoria-root-acceso.sh"
 VENDOR="$AQUI/vendor"
 DEST="$PWD"
 
-uso() { sed -n '2,7p' "$0"; }
+uso() { sed -n "2,9p" "$0"; }
 die() { printf 'FALLO: %s\n' "$*" >&2; exit 1; }
 paso() { printf '\n[%s] %s\n' "$1" "$2"; }
 
-while getopts "d:h" op; do
+EDEST=""
+while getopts "d:e:h" op; do
   case "$op" in
     d) DEST="$OPTARG" ;;
+    e) EDEST="$OPTARG" ;;
     h) uso; exit 0 ;;
     *) uso >&2; exit 2 ;;
   esac
@@ -34,6 +37,13 @@ case "$TARGET" in
   -*|"") die "destino inválido: $TARGET" ;;
 esac
 printf '%s' "$TARGET" | grep -Eq '^[A-Za-z0-9._@-]+$' || die "destino inválido: $TARGET (usa usuario@host o IP)"
+
+if [ -n "$EDEST" ]; then
+  # usuario@servidor:ruta — sin espacios ni metacaracteres: la ruta se usa en un comando remoto
+  printf '%s' "$EDEST" | grep -Eq '^[A-Za-z0-9._@][A-Za-z0-9._@-]*:[A-Za-z0-9._/~-]*$' \
+    || die "destino -e inválido: $EDEST (usa usuario@servidor:ruta)"
+  EHOST="${EDEST%%:*}"; EPATH="${EDEST#*:}"
+fi
 
 for c in ssh scp sha256sum tar mktemp; do
   command -v "$c" >/dev/null 2>&1 || die "falta el comando '$c' en este equipo"
@@ -84,16 +94,33 @@ printf 'Resumen del paso 1 (informativo):\n'
 tar -xzOf "$DEST/$NAME" --wildcards '*/01-preflight.txt' 2>/dev/null \
   | grep -E '^(FREEIPA|ZABBIX_AGENT|GLPI_AGENT)=|^POLITICA_FIBEX' | sed 's/^/  /'
 
+ENTREGADO=1
+if [ "$RESULTADO" = "OK" ] && [ -n "$EDEST" ]; then
+  paso "extra" "Enviando el paquete a $EDEST"
+  if scp -q "$DEST/$NAME" "$DEST/$NAME.sha256" "$EDEST/" \
+     && ssh "$EHOST" "cd ${EPATH:-.} && sha256sum -c $NAME.sha256"; then
+    printf 'Entregado y verificado en %s\n' "$EDEST"
+  else
+    ENTREGADO=0; RESULTADO="FALLO"
+    printf 'FALLO: no se pudo enviar o verificar el paquete en %s\n' "$EDEST"
+  fi
+fi
+
+if [ "$RESULTADO" = "OK" ] && [ "$ENTREGADO" = 1 ]; then
+  # solo lo que el lanzador copió o generó; rmdir no borra la carpeta si tiene otras cosas
+  if ssh -o "ControlPath=$CP" "$TARGET" "cd ~/auditoria && rm -rf auditoria-root-acceso.sh vendor $RDIR && cd .. && rmdir auditoria 2>/dev/null; [ ! -e ~/auditoria/$RDIR ]"; then
+    LIMPIEZA="Host limpio: se borró lo que el lanzador copió y generó en ~/auditoria/."
+  else
+    LIMPIEZA="AVISO: no pude limpiar ~/auditoria/ en el host; bórralo a mano."
+  fi
+fi
+
 printf '\n=== RESULTADO: %s ===\n' "$RESULTADO"
 if [ "$RESULTADO" = "OK" ]; then
   printf 'Paquete: %s/%s\n' "$DEST" "$NAME"
-  printf 'Entrégalo a Freddy. Es confidencial: contiene datos sensibles del host.\n'
-  read -r -p "¿Borrar ~/auditoria/ del host ahora? Ya tienes el paquete verificado. [s/N] " r || r=""
-  case "$r" in
-    s|S) ssh -o "ControlPath=$CP" "$TARGET" 'rm -rf ~/auditoria' && printf 'Borrado.\n' || printf 'AVISO: no pude borrar ~/auditoria en el host.\n' ;;
-    *) printf 'Se deja ~/auditoria/ en el host. Bórralo cuando Freddy confirme que recibió el paquete.\n' ;;
-  esac
+  printf '%s\n' "$LIMPIEZA"
+  printf 'Es confidencial: contiene datos sensibles del host.\n'
   exit 0
 fi
-printf 'No entregues este paquete. Guarda la salida completa de arriba y avisa a Freddy.\n'
+printf 'No entregues este paquete. En el host se dejó ~/auditoria/ sin borrar. Guarda la salida completa de arriba y avisa a Freddy.\n'
 exit 1

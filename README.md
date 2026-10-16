@@ -5,7 +5,7 @@ Hay tres piezas; usa la que corresponda:
 
 | Script | Para qué | Estado |
 |---|---|---|
-| `auditar-host.sh` | **Lanzador**: audita un host remoto con un solo comando (copia, ejecuta con sudo, trae y verifica el paquete). Es lo que usa soporte N1. | v0.1.0 `[BORRADOR]` |
+| `auditar-host.sh` | **Lanzador**: audita un host remoto con un solo comando (copia, ejecuta con sudo, trae y verifica el paquete). Es lo que usa soporte N1. | v0.2.0 `[BORRADOR]` |
 | `auditoria-root-acceso.sh` | Seguridad básica con menú: **quién habilitó root por SSH**, SSH, sudo/PAM, firewall, Fail2ban, Lynis. Criterio CIS Level 2. | v0.10.0 `[BORRADOR]` |
 | `auditoria-host-linux.sh` | Auditoría completa de 7 fases (inventario, red, logs, backups…) según la plantilla del vault. | previo |
 
@@ -47,12 +47,13 @@ cd ~/Workspace/Desarrollo/auditoria-linux && git pull   # es Desarrollo/auditori
 El lanzador corre en **tu equipo** y hace todo: copia el script y `vendor/` al host, ejecuta la auditoría
 con `sudo` (los 8 pasos), trae el `.tar.gz`, verifica el SHA256, comprueba que no falte ningún paso y
 termina con `=== RESULTADO: OK ===` o `=== RESULTADO: FALLO ===`. Te pide la contraseña de SSH una sola vez
-y la de `sudo` de tu usuario; no guarda contraseñas ni llaves. Opción `-d DIR`: carpeta local donde dejar el paquete
-(por defecto, la carpeta actual).
+y la de `sudo` de tu usuario; no guarda contraseñas ni llaves. Opciones: `-d DIR` (carpeta local donde dejar el paquete; por defecto, la carpeta actual) y
+`-e usuario@servidor:ruta` (además envía el paquete por `scp` a ese destino y verifica allí el SHA256).
 
-- **`RESULTADO: OK`**: entrega a Freddy el `.tar.gz` que indica la última línea. Responde `s` solo si quieres borrar
-  `~/auditoria/` del host (ya tienes el paquete verificado); si dudas, responde `N` y bórralo cuando Freddy confirme.
-- **`RESULTADO: FALLO`**: no entregues el paquete; guarda la salida completa y avisa.
+- **`RESULTADO: OK`**: el paquete está verificado en tu equipo (y en el destino de `-e`, si lo diste). El lanzador
+  **borra solo del host** lo que él copió y generó en `~/auditoria/`; no pregunta nada. Entrega a Freddy el `.tar.gz` que indica
+  la última línea.
+- **`RESULTADO: FALLO`**: no entregues el paquete; en el host no se borra nada. Guarda la salida completa y avisa.
 - El script de auditoría imprime al final «Para copiarlo: sudo chown…»: **ignóralo**, el lanzador ya lo hace.
 
 Reglas para soporte N1:
@@ -104,14 +105,14 @@ Mismo resultado en pasos sueltos. Solo si el lanzador no sirve en tu entorno.
 Sin red ni host real (usan `ssh`, `scp`, `sudo` e `id` falsos que solo copian entre carpetas locales):
 
 ```bash
-./tests/test-lanzador.sh   # 21 pruebas del lanzador
+./tests/test-lanzador.sh   # 30 pruebas del lanzador
 ./tests/test-agentes.sh    # 13 pruebas de la detección de Zabbix/GLPI (corre una auditoría completa; tarda)
 ```
 
 Cada prueba se comprobó rompiendo a propósito el código y viendo que falla. No sustituyen la prueba en un host real.
 
 ### No validado todavía [D]
-- Ejecución con root real en un host real, y el lanzador `auditar-host.sh` con SSH real (el primer host es la prueba de campo; hasta ahora solo con ssh/scp falsos).
+- Análisis del primer paquete real (`pve-valencia-noc-viejo`, 2026-10-16): el lanzador 0.1.0 y los 8 pasos corrieron con SSH y root reales (según la salida de Freddy), pero el contenido del paquete aún no se ha revisado contra CIS L2. Los cambios de 0.2.0 (`-e` y limpieza automática del host) solo se han probado con ssh/scp falsos.
 - CentOS 7 y Debian 12.
 - Huella de la llave de CISOfy contra la publicada por CISOfy.
 - Fechas EOL de algunas distribuciones.
