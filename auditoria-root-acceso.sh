@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.5.0-paso5"
+VERSION="0.6.0-paso6"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -369,7 +369,65 @@ paso_05_firewall() {
   ESTADO[5]="ok"
   say "Paso 5 listo → $f"; cat "$r"
 }
-paso_06_fail2ban() { pendiente 6 "Fail2ban: jaulas vs servicios"; }
+# --- paso 6: fail2ban --------------------------------------------------------
+# Solo lectura. Cruza servicios en escucha (por nombre de proceso) con las
+# jaulas activas: una jaula por servicio protegible. El mapeo es heurístico:
+# lo no mapeado se lista como "sin regla conocida" para decisión manual.
+paso_06_fail2ban() {
+  local f="$EVID/06-fail2ban.txt" r="$EVID/06-resumen.txt"; : >"$f"
+  local n=0 bad=0
+  chk() { n=$((n+1)); [ "$2" = "OK" ] || bad=$((bad+1)); printf '%-44s %-8s %s\n' "$1" "$2" "$3" >>"$r"; }
+  printf '== CIS L2 / Fail2ban (%s) ==\n%-44s %-8s %s\n' "$HOST" CONTROL ESTADO DETALLE >"$r"
+
+  if ! have fail2ban-client; then
+    chk "fail2ban instalado" FAIL "fail2ban-client no existe (instalar es acción correctiva, requiere aprobación)"
+    ESTADO[6]="ok"; say "Paso 6 listo → $r"; cat "$r"; return
+  fi
+  have systemctl && run "$f" systemctl status fail2ban --no-pager
+  run "$f" fail2ban-client version
+  run "$f" fail2ban-client status
+  [ "$(id -u)" -ne 0 ] && chk "ejecutado como root" NODET "fail2ban-client requiere root"
+  local act; act="$(systemctl is-active fail2ban 2>&1)"
+  [ "$act" = active ] && chk "servicio fail2ban activo" OK "" || chk "servicio fail2ban activo" FAIL "is-active=$act"
+  have systemctl && [ "$(systemctl is-enabled fail2ban 2>&1)" = enabled ] \
+    && chk "fail2ban habilitado al arranque" OK "" || chk "fail2ban habilitado al arranque" FAIL ""
+
+  # Jaulas activas y su configuración efectiva
+  local jails j
+  jails="$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr -d ',')"
+  for j in $jails; do
+    run "$f" fail2ban-client status "$j"
+    for k in maxretry findtime bantime; do run "$f" fail2ban-client get "$j" "$k"; done
+  done
+  run "$f" bash -c 'fail2ban-client -d 2>&1 | grep -E "banaction|ignoreip" | sort -u'
+  run "$f" bash -c 'ls -l /etc/fail2ban/jail.local /etc/fail2ban/jail.d/ 2>&1'
+  [ -n "$jails" ] && chk "jaulas activas" OK "$(printf '%s' "$jails" | wc -w): $jails" || chk "jaulas activas" FAIL "ninguna"
+
+  # ignoreip: rangos amplios anulan la protección
+  local ig; ig="$(fail2ban-client get "$(printf '%s' "$jails" | awk '{print $1}')" ignoreip 2>/dev/null | tr '\n' ' ')"
+  [ -n "$jails" ] && printf '%s' "$ig" | grep -qE '(^|[ ,])(0\.0\.0\.0/0|10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16)' \
+    && chk "ignoreip sin rangos amplios" FAIL "$ig" || chk "ignoreip sin rangos amplios" OK "$ig"
+
+  # Cruce servicio en escucha -> jaula esperada (proceso:jaulas aceptables)
+  local procs map p want hit
+  procs="$(ss -H -tlnp 2>/dev/null | awk '$4!~/^(127\.|\[::1\])/' | grep -o '(("[^"]*"' | tr -d '("' | sort -u)"
+  printf '\n== Servicios en escucha (no loopback) y jaula esperada ==\n' >>"$f"
+  map='sshd:sshd nginx:nginx-http-auth|nginx-botsearch|nginx-limit-req apache2:apache-auth|apache-badbots httpd:apache-auth|apache-badbots postfix:postfix|postfix-sasl master:postfix|postfix-sasl dovecot:dovecot vsftpd:vsftpd proftpd:proftpd pure-ftpd:pure-ftpd mysqld:mysqld-auth mariadbd:mysqld-auth named:named-refused asterisk:asterisk pveproxy:proxmox exim4:exim'
+  for p in $procs; do
+    want="$(printf '%s\n' $map | awk -F: -v p="$p" '$1==p{print $2}')"
+    if [ -z "$want" ]; then
+      printf 'SIN_REGLA_CONOCIDA %s (decidir a mano si es protegible)\n' "$p" | tee -a "$f" >>"$r"; continue
+    fi
+    hit=""; for j in $jails; do printf '%s' "$j" | grep -qE "^($want)$" && hit="$j"; done
+    printf '%s -> esperada(s): %s | activa: %s\n' "$p" "$want" "${hit:-NINGUNA}" >>"$f"
+    [ -n "$hit" ] && chk "jaula para $p" OK "$hit" || chk "jaula para $p" FAIL "esperada: $want"
+  done
+  printf '%s' "$jails" | grep -qw recidive && chk "jaula recidive (L2)" OK "" || chk "jaula recidive (L2)" FAIL "reincidentes sin ban prolongado"
+
+  printf 'Incumplen o sin determinar: %s de %s\nDetalle: %s\n' "$bad" "$n" "$f" >>"$r"
+  ESTADO[6]="ok"
+  say "Paso 6 listo → $f"; cat "$r"
+}
 paso_07_lynis()    { pendiente 7 "Lynis (tarball vendorizado)"; }
 paso_08_empaquetar() {
   local tgz="$OUT_BASE/auditoria-root-${HOST}-${TS}.tar.gz"
