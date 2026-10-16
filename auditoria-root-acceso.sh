@@ -160,7 +160,79 @@ paso_02_root() {
   ESTADO[2]="ok"
   say "Paso 2 listo → $f"; cat "$r"
 }
-paso_03_ssh()      { pendiente 3 "SSH hardening (sshd -T, Match, drop-ins)"; }
+paso_03_ssh() {
+  local f="$EVID/03-ssh-hardening.txt" r="$EVID/03-resumen.txt"; : >"$f"; : >"$r"
+  if ! have sshd; then
+    echo "sshd no instalado: no aplica" | tee -a "$f" >"$r"; ESTADO[3]="ok"; say "Paso 3: sshd no instalado"; return
+  fi
+  local cfg="$EVID/03-sshd-T.txt"
+  sshd -T -C user=root,host=localhost,addr=127.0.0.1 >"$cfg" 2>>"$f" || run "$f" echo "sshd -T falló (ver arriba)"
+  run "$f" sshd -V
+  run "$f" bash -c 'stat -c "%a %U:%G %n" /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub 2>&1'
+  run "$f" bash -c 'ls -la /etc/ssh/sshd_config.d 2>&1; grep -nE "^[[:space:]]*(Include|Match)" /etc/ssh/sshd_config'
+  run "$f" bash -c 'cat /etc/issue.net 2>&1 | head -n 5'
+
+  # Tabla CIS L2: directiva | regla | valor requerido. Reglas: eq (igual), le (<=), gt (>0), ne (distinto),
+  # nocontain (lista sin ninguno de los patrones débiles).
+  local rules=(
+    "permitrootlogin|eq|no"
+    "passwordauthentication|eq|no"
+    "permitemptypasswords|eq|no"
+    "pubkeyauthentication|eq|yes"
+    "hostbasedauthentication|eq|no"
+    "ignorerhosts|eq|yes"
+    "strictmodes|eq|yes"
+    "usepam|eq|yes"
+    "permituserenvironment|eq|no"
+    "x11forwarding|eq|no"
+    "allowtcpforwarding|eq|no"
+    "allowagentforwarding|eq|no"
+    "permittunnel|eq|no"
+    "gssapiauthentication|eq|no"
+    "kerberosauthentication|eq|no"
+    "loglevel|in|verbose,info"
+    "maxauthtries|le|4"
+    "logingracetime|le|60"
+    "maxsessions|le|10"
+    "clientaliveinterval|gt|0"
+    "clientalivecountmax|le|3"
+    "banner|ne|none"
+    "ciphers|nocontain|3des|cbc|arcfour|rc4|blowfish|cast128"
+    "macs|nocontain|md5|sha1-|umac-64|96"
+    "kexalgorithms|nocontain|group1-|group14-sha1|group-exchange-sha1"
+  )
+  local fail=0 total=0 line d rule val act ok pats
+  {
+    printf '== CIS L2 SSH (%s) — valores de sshd -T con Match root ==\n' "$HOST"
+    printf '%-26s %-10s %-28s %s\n' DIRECTIVA ESTADO ACTUAL REQUERIDO
+  } >"$r"
+  for line in "${rules[@]}"; do
+    IFS='|' read -r d rule val pats <<<"$line"
+    act="$(awk -v k="$d" '$1==k{$1="";sub(/^ /,"");print;exit}' "$cfg" 2>/dev/null)"
+    ok="FAIL"; total=$((total+1))
+    if [ -z "$act" ]; then ok="NODET"
+    else
+      case "$rule" in
+        eq) [ "$act" = "$val" ] && ok="OK" ;;
+        in) case ",$val," in *",$act,"*) ok="OK" ;; esac ;;
+        le) [[ "$act" =~ ^[0-9]+$ ]] && [ "$act" -le "$val" ] && ok="OK" ;;
+        gt) [[ "$act" =~ ^[0-9]+$ ]] && [ "$act" -gt "$val" ] && ok="OK" ;;
+        ne) [ "$act" != "$val" ] && ok="OK" ;;
+        nocontain) ok="OK"; local p; for p in "$val" ${pats//|/ }; do
+                     printf '%s' "$act" | grep -qiE -- "$p" && { ok="FAIL"; break; }; done ;;
+      esac
+    fi
+    [ "$ok" = "OK" ] || fail=$((fail+1))
+    printf '%-26s %-10s %-28s %s %s\n' "$d" "$ok" "$(printf '%s' "$act" | cut -c1-28)" "$rule" "$val${pats:+|$pats}" >>"$r"
+  done
+  {
+    printf 'Incumplen o sin determinar: %s de %s\n' "$fail" "$total"
+    printf 'Nota: ciphers/macs/kex se evalúan por patrones débiles (grep); revisar a mano el detalle en %s\n' "$cfg"
+    printf 'Detalle: %s\n' "$f"
+  } >>"$r"
+  ESTADO[3]="ok"
+  say "Paso 3 listo → $f"; cat "$r"
+}
 paso_04_sudo()     { pendiente 4 "sudo/PAM/su"; }
 paso_05_firewall() { pendiente 5 "Firewall: política vs puertos"; }
 paso_06_fail2ban() { pendiente 6 "Fail2ban: jaulas vs servicios"; }
