@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.2.0-paso2"
+VERSION="0.4.0-paso4"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -233,7 +233,58 @@ paso_03_ssh() {
   ESTADO[3]="ok"
   say "Paso 3 listo → $f"; cat "$r"
 }
-paso_04_sudo()     { pendiente 4 "sudo/PAM/su"; }
+paso_04_sudo() {
+  local f="$EVID/04-sudo-pam-su.txt" r="$EVID/04-resumen.txt"; : >"$f"; : >"$r"
+  local sd; sd="$(grep -rhvE '^[[:space:]]*(#|$)' /etc/sudoers /etc/sudoers.d 2>/dev/null)"
+  printf '%s\n' "$sd" >"$EVID/04-sudoers-efectivo.txt"
+
+  run "$f" bash -c 'stat -c "%a %U:%G %n" /etc/sudoers /etc/sudoers.d /etc/sudoers.d/* /etc/pam.d/su /etc/shadow /etc/gshadow /etc/passwd /etc/group 2>&1'
+  have visudo && run "$f" visudo -c
+  have sudo && run "$f" sudo -V
+  run "$f" bash -c 'grep -RnE "NOPASSWD|!authenticate|ALL[[:space:]]*=[[:space:]]*\(ALL(:ALL)?\)[[:space:]]*ALL|Defaults" /etc/sudoers /etc/sudoers.d 2>&1 | grep -v ":[[:space:]]*#"'
+  run "$f" bash -c 'getent group sudo wheel admin root'
+  run "$f" bash -c 'grep -nE "pam_wheel|pam_rootok|pam_securetty|pam_faillock|pam_tally2|pwquality|pam_unix" /etc/pam.d/su /etc/pam.d/su-l /etc/pam.d/sudo /etc/pam.d/sshd /etc/pam.d/common-auth /etc/pam.d/system-auth /etc/pam.d/password-auth 2>&1'
+  run "$f" bash -c 'cat /etc/security/pwquality.conf 2>&1 | grep -vE "^[[:space:]]*(#|$)"; cat /etc/security/faillock.conf 2>&1 | grep -vE "^[[:space:]]*(#|$)"'
+  run "$f" bash -c 'grep -E "^(PASS_MAX_DAYS|PASS_MIN_DAYS|PASS_WARN_AGE|UMASK|ENCRYPT_METHOD|SU_WHEEL_ONLY|LOGIN_RETRIES)" /etc/login.defs'
+  run "$f" bash -c 'getent passwd root; passwd -S root 2>&1; chage -l root 2>&1'
+  run "$f" bash -c 'cat /etc/securetty 2>&1 | head -n 20'
+  run "$f" bash -c 'grep -nE "TMOUT|umask|^(export )?PATH" /root/.bashrc /root/.profile /etc/profile /etc/profile.d/* /etc/bash.bashrc /etc/bashrc 2>&1'
+  run "$f" bash -c 'echo "PATH de root:"; sudo -n env 2>/dev/null | grep ^PATH; echo "$PATH" | tr ":" "\n" | grep -nE "^\.?$|^\." '
+  # Cuentas
+  run "$f" bash -c 'awk -F: "(\$2==\"\" ){print \"SIN PASSWORD: \" \$1}" /etc/shadow 2>&1'
+  run "$f" bash -c 'awk -F: "\$3==0{print \"UID0: \" \$1}" /etc/passwd; cut -d: -f3 /etc/passwd | sort | uniq -d | sed "s/^/UID duplicado: /"'
+  run "$f" bash -c 'awk -F: "\$3>=1000 && \$7!~/nologin|false/ {print \$1\":\"\$3\":\"\$7}" /etc/passwd'
+  run "$f" bash -c 'awk -F: "{print \$1\" \"\$2\" lastchg=\"\$3\" max=\"\$5}" /etc/shadow 2>&1 | grep -vE " (\*|!|!!|!\*) "'
+  run "$f" bash -c 'grep -RE "^[^#]*(NOPASSWD)" /etc/sudoers /etc/sudoers.d 2>&1 | cut -d: -f1 | sort -u'
+
+  # Evaluación mecánica
+  local n=0 bad=0
+  chk() { n=$((n+1)); [ "$2" = "OK" ] || bad=$((bad+1)); printf '%-44s %-8s %s\n' "$1" "$2" "$3" >>"$r"; }
+  printf '== CIS L2 sudo/PAM/su/root (%s) ==\n%-44s %-8s %s\n' "$HOST" CONTROL ESTADO DETALLE >"$r"
+  if [ ! -r /etc/sudoers ]; then
+    chk "sudoers legible (ejecutar como root)" NODET "sin lectura: controles sudo no evaluados"
+  elif have sudo; then
+    printf '%s' "$sd" | grep -qE '^[[:space:]]*Defaults[[:space:]].*use_pty' && chk "sudo use_pty" OK "" || chk "sudo use_pty" FAIL "falta Defaults use_pty"
+    printf '%s' "$sd" | grep -qE '^[[:space:]]*Defaults[[:space:]].*logfile' && chk "sudo logfile" OK "" || chk "sudo logfile" FAIL "falta Defaults logfile (CIS 5.2.3)"
+    printf '%s' "$sd" | grep -qE 'NOPASSWD|!authenticate' && chk "sudo sin NOPASSWD/!authenticate" FAIL "$(printf '%s' "$sd" | grep -cE 'NOPASSWD|!authenticate') regla(s)" || chk "sudo sin NOPASSWD/!authenticate" OK ""
+    printf '%s' "$sd" | grep -qE 'timestamp_timeout[[:space:]]*=[[:space:]]*(-1|[6-9]|[1-9][0-9])' && chk "sudo timestamp_timeout <=5" FAIL "" || chk "sudo timestamp_timeout <=5" OK "(defecto 5 o menor)"
+  else
+    chk "sudo instalado" NODET "sudo no instalado"
+  fi
+  grep -qE '^[^#]*pam_wheel\.so.*(use_uid)' /etc/pam.d/su 2>/dev/null && chk "su restringido (pam_wheel use_uid)" OK "" || chk "su restringido (pam_wheel use_uid)" FAIL "/etc/pam.d/su sin pam_wheel activo"
+  local rp; rp="$(passwd -S root 2>/dev/null | awk '{print $2}')"
+  [ -n "$rp" ] && chk "estado password de root" OK "passwd -S: $rp (L=bloqueada, P=activa; decisión de política)" || chk "estado password de root" NODET ""
+  [ "$(awk -F: '$3==0{c++}END{print c+0}' /etc/passwd)" = 1 ] && chk "único UID 0" OK "" || chk "único UID 0" FAIL "$(awk -F: '$3==0{printf "%s ",$1}' /etc/passwd)"
+  [ -z "$(awk -F: '$2==""{print $1}' /etc/shadow 2>/dev/null)" ] && chk "sin cuentas con password vacío" OK "" || chk "sin cuentas con password vacío" FAIL "$(awk -F: '$2==""{printf "%s ",$1}' /etc/shadow 2>/dev/null)"
+  [ "$(stat -c %a /etc/shadow 2>/dev/null)" -le 640 ] 2>/dev/null && chk "permisos /etc/shadow <=640" OK "" || chk "permisos /etc/shadow <=640" FAIL "$(stat -c %a /etc/shadow 2>/dev/null)"
+  local pm; pm="$(awk '$1=="PASS_MAX_DAYS"{print $2}' /etc/login.defs 2>/dev/null)"
+  [ -n "$pm" ] && [ "$pm" -le 365 ] 2>/dev/null && chk "PASS_MAX_DAYS <=365" OK "$pm" || chk "PASS_MAX_DAYS <=365" FAIL "${pm:-no definido}"
+  { grep -qE '^[^#]*pam_(faillock|tally2)' /etc/pam.d/* 2>/dev/null || [ -s /etc/security/faillock.conf ]; } && chk "bloqueo por intentos (faillock)" OK "" || chk "bloqueo por intentos (faillock)" FAIL "no configurado"
+  grep -rqE '^[[:space:]]*minlen' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null && chk "pwquality minlen" OK "" || chk "pwquality minlen" FAIL "no definido"
+  printf 'Incumplen o sin determinar: %s de %s\nDetalle: %s\n' "$bad" "$n" "$f" >>"$r"
+  ESTADO[4]="ok"
+  say "Paso 4 listo → $f"; cat "$r"
+}
 paso_05_firewall() { pendiente 5 "Firewall: política vs puertos"; }
 paso_06_fail2ban() { pendiente 6 "Fail2ban: jaulas vs servicios"; }
 paso_07_lynis()    { pendiente 7 "Lynis (tarball vendorizado)"; }
