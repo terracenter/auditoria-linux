@@ -10,7 +10,7 @@ set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.9.0-revision-opus"
+VERSION="0.10.0"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -46,6 +46,43 @@ run() {
 have() { command -v "$1" >/dev/null 2>&1; }
 say()  { printf '%s\n' "$*"; }
 
+# detectar_agente: estado de un agente por evidencia (paquete, binario, unidad systemd, config).
+# Uso: detectar_agente ARCHIVO ETIQUETA "unidades" "binarios" "configs" "directivas" "paquetes"
+# Imprime en stdout: activo | instalado-inactivo | no. La evidencia va a ARCHIVO.
+# De la config solo copia las directivas listadas: nunca claves PSK, usuarios, contraseñas ni proxy.
+detectar_agente() {
+  local f="$1" etiqueta="$2" unidades="$3" binarios="$4" configs="$5" directivas="$6" paquetes="$7"
+  local u b c p inst="no" act="no"
+  printf '## agente %s
+' "$etiqueta" >>"$f"
+  for p in $paquetes; do
+    if have dpkg-query && dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+      inst="si"; run "$f" dpkg-query -W "$p"
+    elif have rpm && rpm -q "$p" >/dev/null 2>&1; then
+      inst="si"; run "$f" rpm -q "$p"
+    fi
+  done
+  for b in $binarios; do
+    have "$b" && { inst="si"; run "$f" bash -c "command -v $b; $b --version 2>&1 | head -1"; }
+  done
+  if have systemctl; then
+    for u in $unidades; do
+      if systemctl list-unit-files --no-legend "$u.service" 2>/dev/null | grep -q .; then
+        inst="si"
+        run "$f" systemctl is-enabled "$u"
+        run "$f" systemctl is-active "$u"
+        [ "$(systemctl is-active "$u" 2>/dev/null)" = active ] && act="si"
+      fi
+    done
+  fi
+  for c in $configs; do   # sin comillas: admite globs como conf.d/*.cfg
+    [ -f "$c" ] && run "$f" bash -c "echo '# $c'; grep -hE '^[[:space:]]*($directivas)[[:space:]]*=' '$c' | sed -E 's#(//)[^/@[:space:]]*@#\1***@#'"
+  done
+  if [ "$act" = si ]; then echo activo
+  elif [ "$inst" = si ]; then echo instalado-inactivo
+  else echo no; fi
+}
+
 # --- paso 1: preflight ------------------------------------------------------
 paso_01_preflight() {
   local f="$EVID/01-preflight.txt"; : >"$f"
@@ -67,6 +104,20 @@ paso_01_preflight() {
   run "$f" systemctl is-active sssd
   printf 'FREEIPA=%s\n' "$ipa" | tee -a "$f" >"$EVID/.freeipa"
 
+  # Agentes que la política Fibex exige en cada host: Zabbix agent y cliente GLPI.
+  local zbx glpi pz="FALLA" pg="FALLA"
+  zbx="$(detectar_agente "$f" zabbix "zabbix-agent2 zabbix-agent" "zabbix_agent2 zabbix_agentd" \
+    "/etc/zabbix/zabbix_agent2.conf /etc/zabbix/zabbix_agentd.conf" \
+    "Server|ServerActive|Hostname|TLSConnect|TLSAccept" "zabbix-agent2 zabbix-agent")"
+  glpi="$(detectar_agente "$f" glpi "glpi-agent" "glpi-agent" \
+    "/etc/glpi-agent/agent.cfg /etc/glpi-agent/conf.d/*.cfg" \
+    "server|tag|local|no-ssl-check" "glpi-agent")"
+  printf 'ZABBIX_AGENT=%s\n' "$zbx" | tee -a "$f" >"$EVID/.zabbix"
+  printf 'GLPI_AGENT=%s\n' "$glpi" | tee -a "$f" >"$EVID/.glpi"
+  [ "$zbx" = activo ] && pz="OK"
+  [ "$glpi" = activo ] && pg="OK"
+  printf 'POLITICA_FIBEX zabbix_agent=%s glpi_agent=%s\n' "$pz" "$pg" >>"$f"
+
   # Detección de servicios en escucha (base para firewall/fail2ban).
   run "$f" ss -tulnp
   # Herramientas disponibles (informativo; no se instala nada).
@@ -75,7 +126,9 @@ paso_01_preflight() {
     have "$t" && printf 'tool:%s=si\n' "$t" >>"$f" || printf 'tool:%s=no\n' "$t" >>"$f"
   done
   ESTADO[1]="ok"
-  say "Paso 1 listo → $f  (FreeIPA: $ipa)"
+  say "Paso 1 listo → $f  (FreeIPA: $ipa | Zabbix agent: $zbx | GLPI agent: $glpi)"
+  [ "$pz" = OK ] || say "AVISO política Fibex: Zabbix agent no está activo ($zbx)."
+  [ "$pg" = OK ] || say "AVISO política Fibex: cliente GLPI no está activo ($glpi)."
 }
 
 pendiente() { say "Paso $1 ($2): aún no implementado en este esqueleto."; ESTADO[$1]="pendiente"; }
@@ -560,7 +613,7 @@ paso_08_empaquetar() {
 }
 
 NOMBRES=(
-  "" "Preflight (identidad, distro, FreeIPA, listeners)"
+  "" "Preflight (identidad, distro, FreeIPA, Zabbix/GLPI agent, listeners)"
   "Acceso a root (prioridad)" "SSH hardening" "sudo / PAM / su"
   "Firewall" "Fail2ban" "Lynis" "Empaquetar resultado (.tar.gz + SHA256)"
 )

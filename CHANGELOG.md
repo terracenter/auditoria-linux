@@ -6,6 +6,9 @@ El formato sigue Keep a Changelog y versionado semántico cuando aplique.
 
 ## [Unreleased]
 
+### Added (0.10.0)
+- Paso 1: detecta Zabbix agent (`zabbix-agent2`/`zabbix-agent`) y cliente GLPI (`glpi-agent`) por paquete, binario, unidad systemd y configuración. Estados `activo`, `instalado-inactivo` o `no`; deja `.zabbix` y `.glpi` en la evidencia y la línea `POLITICA_FIBEX` en `01-preflight.txt`; avisa si alguno no está activo. De la configuración solo copia directivas no secretas (sin PSK, usuarios, contraseñas ni proxy) y enmascara credenciales dentro de URLs.
+
 ### Added
 - `auditoria-root-acceso.sh` 0.9.0 (`[BORRADOR]`, sin validar con root real): menú de 8 pasos de solo lectura
   (preflight, acceso a root y quién lo habilitó, SSH, sudo/PAM/su, firewall, Fail2ban, Lynis, empaquetado)

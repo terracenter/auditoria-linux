@@ -22,7 +22,7 @@ entrada en el log de sudo.
 
 | # | Paso | Qué revisa |
 |---|---|---|
-| 1 | Preflight | SO, red, FreeIPA/sssd, servicios en escucha, herramientas |
+| 1 | Preflight | SO, red, FreeIPA/sssd, **Zabbix agent y cliente GLPI** (política Fibex: ambos activos en cada host), servicios en escucha, herramientas |
 | 2 | Acceso a root | `sshd -T` efectivo (Match, drop-ins), authorized_keys, UID 0, línea de tiempo de archivos, logs/auditd: **quién lo habilitó** |
 | 3 | SSH | 25 reglas CIS L2 sobre la configuración efectiva |
 | 4 | sudo / PAM / su | sudoers, `pam_wheel`, faillock, pwquality, permisos de `/etc/shadow` |
