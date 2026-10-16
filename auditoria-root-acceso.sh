@@ -5,9 +5,10 @@
 # No instala paquetes, no modifica configuración, no toca la red.
 set -u
 set -o pipefail
+PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.1.0-esqueleto"
-OUT_BASE="${TMPDIR:-/tmp}"
+VERSION="0.2.0-paso2"
+OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
 while [ $# -gt 0 ]; do
@@ -73,7 +74,92 @@ paso_01_preflight() {
 
 pendiente() { say "Paso $1 ($2): aún no implementado en este esqueleto."; ESTADO[$1]="pendiente"; }
 
-paso_02_root()     { pendiente 2 "Acceso a root (quién lo habilitó)"; }
+# --- paso 2: acceso a root (quién lo habilitó) --------------------------------
+# Solo lectura. Reúne: estado efectivo, línea de tiempo de archivos, y rastros
+# de quién los tocó (logs, auditd, historiales). Sin auditd/logs viejos el
+# "quién" puede quedar INDETERMINADO: el resumen lo dice explícitamente.
+paso_02_root() {
+  local f="$EVID/02-root-acceso.txt" r="$EVID/02-resumen.txt"; : >"$f"; : >"$r"
+  local u
+
+  # 2.1 Estado efectivo de SSH para root (considera Match y drop-ins).
+  if have sshd; then
+    run "$f" bash -c 'sshd -T 2>&1 | grep -Ei "^(permitrootlogin|passwordauthentication|pubkeyauthentication|allowusers|allowgroups|denyusers|denygroups|authorizedkeysfile|authenticationmethods|permitemptypasswords|usepam)"'
+    run "$f" sshd -T -C user=root,host=localhost,addr=127.0.0.1
+    run "$f" bash -c 'sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>&1 | grep -i "^permitrootlogin"'
+  else
+    say "  sshd no está instalado: se omite el estado efectivo."
+  fi
+  run "$f" bash -c 'grep -RnEi "^[[:space:]]*(PermitRootLogin|Match|Include|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile)" /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>&1'
+  # Instalación/paquete: ¿la config difiere de la que trae el paquete?
+  have dpkg && run "$f" bash -c 'dpkg -V openssh-server 2>&1'
+  have rpm  && run "$f" bash -c 'rpm -V openssh-server 2>&1'
+
+  # 2.2 Línea de tiempo: cuándo cambió cada archivo relevante (ctime = cambio real).
+  run "$f" bash -c 'ls -la --time-style=full-iso /etc/ssh /etc/ssh/sshd_config.d 2>&1'
+  run "$f" bash -c 'stat -c "%z | mtime=%y | %U:%G %a | %n" /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* /etc/passwd /etc/shadow /etc/group /etc/sudoers /etc/sudoers.d/* /etc/pam.d/su /etc/pam.d/sshd /root/.ssh/authorized_keys /root/.ssh/authorized_keys2 /etc/ssh/authorized_keys/* 2>/dev/null | sort'
+  run "$f" bash -c 'find /etc/ssh /root/.ssh /etc/sudoers.d -type f \( -name "*.bak*" -o -name "*.orig" -o -name "*~" -o -name "*.save" -o -name "*.rpmsave" -o -name "*.dpkg-*" \) -exec stat -c "%z | %n" {} + 2>&1'
+
+  # 2.3 Cuentas con poder de root.
+  run "$f" bash -c 'awk -F: "\$3==0 {print}" /etc/passwd'
+  run "$f" bash -c 'getent passwd root; passwd -S root 2>&1; chage -l root 2>&1'
+  run "$f" bash -c 'getent group sudo wheel admin root'
+  run "$f" bash -c 'grep -RvE "^[[:space:]]*(#|$)" /etc/sudoers /etc/sudoers.d 2>&1'
+  run "$f" bash -c 'grep -vE "^[[:space:]]*(#|$)" /etc/pam.d/su /etc/pam.d/su-l 2>&1'
+  run "$f" bash -c 'grep -E "^(passwd|group|shadow|sudoers)" /etc/nsswitch.conf'
+
+  # 2.4 authorized_keys de root: huella y comentario (la llave pública no es secreta).
+  local ak
+  for ak in /root/.ssh/authorized_keys /root/.ssh/authorized_keys2; do
+    [ -f "$ak" ] || continue
+    run "$f" bash -c "stat -c '%n | ctime=%z | mtime=%y | %U %a' '$ak'; wc -l '$ak'; ssh-keygen -lf '$ak' 2>&1; grep -nE '^(command=|from=|no-)' '$ak' | cut -c1-120"
+  done
+  run "$f" bash -c 'ls -la /root/.ssh 2>&1'
+
+  # 2.5 Quién entró como root y cuándo.
+  run "$f" bash -c 'last -F -n 50 root 2>&1'
+  run "$f" bash -c 'lastlog -u root 2>&1'
+  run "$f" bash -c 'zgrep -hE "Accepted .* for root" /var/log/auth.log* /var/log/secure* 2>/dev/null | tail -n 100'
+  have journalctl && run "$f" bash -c 'journalctl --no-pager -q -u ssh -u sshd 2>&1 | grep -E "Accepted .* for root|Failed .* for root" | tail -n 100'
+  have journalctl && run "$f" bash -c 'journalctl --no-pager -q --disk-usage 2>&1; journalctl --no-pager -q 2>&1 | head -n 2'
+
+  # 2.6 Quién modificó (rastros). Cada fuente se guarda aparte para citarla.
+  local pat='sshd_config|PermitRootLogin|authorized_keys|passwd root|chpasswd|usermod|visudo|sudoers|sudo -i|sudo su|su -'
+  run "$f" bash -c "zgrep -hE 'COMMAND=.*($pat)' /var/log/auth.log* /var/log/secure* 2>/dev/null | tail -n 200"
+  have journalctl && run "$f" bash -c "journalctl --no-pager -q _COMM=sudo 2>&1 | grep -E '$pat' | tail -n 200"
+  # Historiales de shell (evidencia débil: editable por el dueño).
+  run "$f" bash -c "for h in /root/.bash_history /home/*/.bash_history /root/.zsh_history /home/*/.zsh_history; do [ -f \"\$h\" ] && { echo \"== \$h\"; grep -nE '$pat' \"\$h\" | tail -n 50; }; done 2>&1"
+  # auditd: la única fuente que atribuye por UID real (auid).
+  if have ausearch; then
+    run "$f" bash -c 'auditctl -l 2>&1'
+    for u in /etc/ssh/sshd_config /etc/ssh/sshd_config.d /root/.ssh/authorized_keys /etc/passwd /etc/shadow /etc/sudoers; do
+      run "$f" bash -c "ausearch -i -f '$u' 2>&1 | tail -n 60"
+    done
+  else
+    printf 'AUDITD=no: sin auditd no hay atribución fiable por auid.\n' >>"$f"
+  fi
+
+  # 2.7 FreeIPA: root/sudo pueden venir del dominio, no del host.
+  if grep -q '^FREEIPA=si' "$EVID/.freeipa" 2>/dev/null; then
+    run "$f" bash -c 'grep -vE "^[[:space:]]*(#|$)" /etc/sssd/sssd.conf 2>&1 | grep -viE "password|secret"'
+    run "$f" bash -c 'sudo -l -U root 2>&1 | head -n 40'
+    printf 'MANUAL(FreeIPA): en el servidor IPA con ticket admin: ipa hbacrule-find; ipa sudorule-find; ipa user-show root --all\n' >>"$f"
+  fi
+
+  # Resumen mecánico (hechos, sin interpretar).
+  {
+    printf '== Resumen paso 2 (%s) ==\n' "$HOST"
+    printf 'permitrootlogin efectivo (root@localhost): '
+    sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | grep -i '^permitrootlogin' || echo 'no determinado'
+    printf 'UID 0: '; awk -F: '$3==0{printf "%s ",$1}' /etc/passwd; echo
+    printf 'auditd: '; { have ausearch && echo si; } || echo no
+    printf 'Archivos clave por ctime (más reciente al final):\n'
+    stat -c '  %z  %n' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* /root/.ssh/authorized_keys /etc/sudoers /etc/sudoers.d/* 2>/dev/null | sort
+    printf 'Detalle completo en: %s\n' "$f"
+  } >"$r"
+  ESTADO[2]="ok"
+  say "Paso 2 listo → $f"; cat "$r"
+}
 paso_03_ssh()      { pendiente 3 "SSH hardening (sshd -T, Match, drop-ins)"; }
 paso_04_sudo()     { pendiente 4 "sudo/PAM/su"; }
 paso_05_firewall() { pendiente 5 "Firewall: política vs puertos"; }
