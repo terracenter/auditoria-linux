@@ -23,6 +23,10 @@ out=""; while [ $# -gt 0 ]; do case "$1" in -o) shift; out="$1" ;; esac; shift; 
 d="$out/auditoria-root-h1-20260101-000000"; mkdir -p "$d"
 printf 'pasos_sin_ejecutar=%s\n' "${STUB_FALTAN:-ninguno}" >"$d/MANIFEST.txt"
 printf 'FREEIPA=no\nZABBIX_AGENT=activo\nGLPI_AGENT=no\nPOLITICA_FIBEX zabbix_agent=OK glpi_agent=FALLA\n' >"$d/01-preflight.txt"
+if [ "${STUB_BAN:-2}" != sin ]; then
+  if [ "${STUB_BAN:-2}" = 0 ]; then printf 'AUTORIZADO(PAM) freddy [origen: cuenta-local]\nBANDERAS_ROJAS=0\n' >"$d/02-resumen.txt"
+  else printf 'BANDERA ROJA: jramirez no está en la lista autorizada [origen: grupo-sudo]\nBANDERA ROJA: root 1 llave(s) SSH autorizadas para root\nBANDERAS_ROJAS=2\n' >"$d/02-resumen.txt"; fi
+fi
 tar -C "$out" -czf "$out/auditoria-root-h1-20260101-000000.tar.gz" "$(basename "$d")"
 ( cd "$out" && sha256sum auditoria-root-h1-20260101-000000.tar.gz >auditoria-root-h1-20260101-000000.tar.gz.sha256 )
 EOF
@@ -70,6 +74,7 @@ check "feliz: RESULTADO OK" "grep -q 'RESULTADO: OK' '$T/out'"
 check "feliz: paquete y sha256 en destino" "ls '$T/dest'/auditoria-root-*.tar.gz '$T/dest'/auditoria-root-*.sha256 >/dev/null 2>&1"
 check "feliz: permisos 600" "[ \"\$(stat -c %a '$T/dest'/auditoria-root-*.tar.gz)\" = 600 ]"
 check "feliz: muestra POLITICA_FIBEX" "grep -q POLITICA_FIBEX '$T/out'"
+check "feliz: muestra las banderas rojas y el aviso ATENCIÓN" "grep -q 'BANDERA ROJA: jramirez' '$T/out' && grep -q 'ATENCIÓN: 2 BANDERA(S) ROJA(S)' '$T/out'"
 check "feliz: limpia el host sin preguntar" "[ ! -d '$T/home/auditoria' ] && grep -q 'Host limpio' '$T/out' && ! grep -q '\[s/N\]' '$T/out'"
 check "feliz: no envía a ningún DESTINO" "! grep -q 'entrega@' '$T/log'"
 
@@ -143,6 +148,12 @@ check "sin vendor/lynis: exit 1 y sin llamadas" "[ $rc -eq 1 ] && [ ! -s '$T/log
 mkdir -p "$T/repo/vendor/lynis"
 lanza "" "$LANZ" -d "$T/no-existe" u@10.0.0.9; rc=$?
 check "destino local inexistente: exit 1 y sin llamadas" "[ $rc -eq 1 ] && [ ! -s '$T/log' ]"
+
+# 9. banderas rojas: sin banderas no hay aviso; un paquete de un script anterior se avisa pero no falla
+rm -f "$T/dest/"*; lanza "" env STUB_BAN=0 "$LANZ" -d "$T/dest" u@10.0.0.9 </dev/null; rc=$?
+check "sin banderas: exit 0, muestra BANDERAS_ROJAS=0 y no avisa ATENCIÓN" "[ $rc -eq 0 ] && grep -q 'BANDERAS_ROJAS=0' '$T/out' && ! grep -q ATENCIÓN '$T/out'"
+rm -f "$T/dest/"*; lanza "" env STUB_BAN=sin "$LANZ" -d "$T/dest" u@10.0.0.9 </dev/null; rc=$?
+check "paquete sin comprobación de usuarios: lo dice, no falla y no inventa banderas" "[ $rc -eq 0 ] && grep -q 'anterior a 0.11.0' '$T/out' && ! grep -q ATENCIÓN '$T/out' && grep -q 'RESULTADO: OK' '$T/out'"
 
 printf '\n%s pruebas, %s fallos\n' "$N" "$FAIL"
 [ "$FAIL" -eq 0 ]

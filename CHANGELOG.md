@@ -6,6 +6,11 @@ El formato sigue Keep a Changelog y versionado semántico cuando aplique.
 
 ## [Unreleased]
 
+### Added (0.13.0)
+- `auditoria-root-acceso.sh` 0.11.0, paso 2: compara los usuarios del host con la lista autorizada de Fibex (PAM: freddy, manuel, angel, levy, deudes; IPA: ftaborda, mpernia, anava, lrivero, dlinares; editable en dos variables al inicio del script) y marca **BANDERA ROJA** a: root activo (SSH permite login, contraseña sin bloquear o llaves en `authorized_keys`) y a todo usuario con cuenta local, miembro de sudo/wheel/admin, nombrado en sudoers, visto en `last` o en el log de sudo que no esté en las listas. Deja `.banderas-rojas` en el paquete y `BANDERAS_ROJAS=N` en `02-resumen.txt`; los alias de sudoers salen como REVISAR A MANO. No cambia el número de pasos (siguen siendo 8).
+- `auditar-host.sh` 0.3.0: muestra las banderas rojas en el paso 6 y un aviso `ATENCIÓN` al final; no cambia el resultado OK/FALLO de la auditoría.
+- `tests/test-usuarios.sh` (32 pruebas) y 3 pruebas nuevas en `tests/test-lanzador.sh` (39); verificadas por mutación (7 mutaciones, todas detectadas).
+
 ### Changed (0.12.0)
 - `auditar-host.sh` 0.2.0: se elimina la pregunta de borrar `~/auditoria/`. Si el paquete queda verificado en el equipo del operador (y en el destino de `-e`, si se dio), el lanzador borra del host solo lo que él copió y generó; si algo falla, no borra nada.
 - Nueva opción `-e usuario@servidor:ruta`: envía el paquete por `scp` y verifica allí el SHA256. Sin `-e`, pregunta a dónde enviarlo (Enter = no enviar; hasta 3 intentos si el destino es inválido). Un destino mal formado se rechaza antes de abrir ninguna conexión.

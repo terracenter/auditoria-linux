@@ -10,7 +10,7 @@ set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.10.0"
+VERSION="0.11.0"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -133,6 +133,108 @@ paso_01_preflight() {
 
 pendiente() { say "Paso $1 ($2): aún no implementado en este esqueleto."; ESTADO[$1]="pendiente"; }
 
+# --- política de usuarios (Freddy, 2026-10-16, "hasta nuevo aviso") -----------
+# ÚNICO lugar donde se editan las listas. Todo usuario con acceso o poder en el host que no
+# esté en una de las dos listas, y root si está activo, sale como BANDERA ROJA hasta que se aclare.
+USUARIOS_PAM_AUTORIZADOS="freddy manuel angel levy deudes"      # hosts Linux (cuentas locales/PAM)
+USUARIOS_IPA_AUTORIZADOS="ftaborda mpernia anava lrivero dlinares"   # administradores IT en FreeIPA
+PASSWD_F="${PASSWD_F:-/etc/passwd}"
+SUDOERS_F="${SUDOERS_F:-/etc/sudoers}"
+SUDOERS_D="${SUDOERS_D:-/etc/sudoers.d}"
+ROOT_HOME="${ROOT_HOME:-/root}"
+AUTH_LOGS="${AUTH_LOGS:-/var/log/auth.log* /var/log/secure*}"
+
+# usuarios_candidatos: usuarios con cuenta, poder o rastro de acceso en el host. Imprime usuario|origen.
+usuarios_candidatos() {
+  local g t
+  awk -F: '$3>=1000 && $3!=65534 && $7!~/(nologin|false)$/ {print $1"|cuenta-local"} $3==0 && $1!="root" {print $1"|UID0-no-root"}' "$PASSWD_F" 2>/dev/null
+  for g in sudo wheel admin; do
+    getent group "$g" 2>/dev/null | awk -F: -v g="$g" '$4!="" {n=split($4,a,","); for(i=1;i<=n;i++) print a[i]"|grupo-"g}'
+  done
+  cat "$SUDOERS_F" "$SUDOERS_D"/* 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' \
+    | grep -vE '^[[:space:]]*(Defaults|Cmnd_Alias|User_Alias|Host_Alias|Runas_Alias)' | awk '{print $1}' | tr ',' '\n' | sort -u \
+    | while read -r t; do
+        case "$t" in
+          root|"") ;;
+          %*) g="${t#%}"; getent group "$g" 2>/dev/null | awk -F: -v g="$g" '{n=split($4,a,","); for(i=1;i<=n;i++) if(a[i]!="") print a[i]"|sudoers-%"g}' ;;
+          [A-Z_][A-Z0-9_]*) printf '%s|ALIAS-sudoers\n' "$t" ;;
+          *) printf '%s|sudoers\n' "$t" ;;
+        esac
+      done
+  last -w 2>/dev/null | awk 'NF && $1!~/^(reboot|shutdown|runlevel|wtmp|root)$/ && $1!~/^\(/ {print $1"|login-wtmp"}'
+  { have journalctl && journalctl --no-pager -q _COMM=sudo 2>/dev/null
+    # shellcheck disable=SC2086
+    zcat -f $AUTH_LOGS 2>/dev/null; } | sed -nE 's/.*sudo(\[[0-9]+\])?: +([A-Za-z0-9._-]+) : .*/\2|sudo-log/p'
+}
+
+# usuarios_unificar: stdin usuario|origen (repetidos) → una línea por usuario, orígenes unidos con +. Descarta root.
+usuarios_unificar() {
+  grep -E '^[A-Za-z0-9._-]+\|' | grep -v '^root|' \
+    | awk -F'|' '{ if(!($1 in o)) o[$1]=$2; else if(index("+" o[$1] "+", "+" $2 "+")==0) o[$1]=o[$1] "+" $2 } END{for(u in o) print u "|" o[u]}' | sort
+}
+
+# usuario_autorizado: imprime PAM o IPA si el usuario está en una lista; falla si no.
+usuario_autorizado() {
+  local a
+  for a in $USUARIOS_PAM_AUTORIZADOS; do [ "$a" = "$1" ] && { echo PAM; return 0; }; done
+  for a in $USUARIOS_IPA_AUTORIZADOS; do [ "$a" = "$1" ] && { echo IPA; return 0; }; done
+  return 1
+}
+
+# root_activo: un motivo por línea; vacío = root no está activo (SSH bloqueado, contraseña bloqueada, sin llaves).
+root_activo() {
+  local a r st k n vals="" fp
+  if have sshd; then
+    for a in 127.0.0.1 10.0.0.1 192.168.1.1 203.0.113.1; do
+      r="$(sshd -T -C "user=root,host=remoto,addr=$a" 2>/dev/null | awk '$1=="permitrootlogin"{print $2}')"
+      [ -n "$r" ] || r="desconocido"
+      [ "$r" = no ] || case " $vals " in *" $r "*) ;; *) vals="$vals $r" ;; esac
+    done
+    [ -z "$vals" ] || echo "PermitRootLogin efectivo de root no es 'no' o no se pudo leer (valores:${vals})"
+  fi
+  st="$(passwd -S root 2>/dev/null | awk '{print $2}')"
+  case "$st" in
+    L|LK) ;;
+    "") echo "no se pudo leer el estado de la contraseña de root" ;;
+    *) echo "la contraseña de root no está bloqueada (passwd -S: $st)" ;;
+  esac
+  for k in "$ROOT_HOME/.ssh/authorized_keys" "$ROOT_HOME/.ssh/authorized_keys2"; do
+    [ -f "$k" ] || continue
+    n="$(grep -cvE '^[[:space:]]*(#|$)' "$k")"
+    [ "$n" -gt 0 ] || continue
+    fp="$(ssh-keygen -lf "$k" 2>/dev/null | awk '{printf "%s%s %s", (NR>1?"; ":""), $2, $3}')"
+    echo "$n llave(s) SSH autorizadas para root en $k [${fp:-sin huellas}]"
+  done
+}
+
+# usuarios_vs_politica: compara los usuarios del host con las listas. $1 = evidencia cruda, $2 = archivo de banderas.
+# Imprime el resumen; deja en $2 una línea usuario|motivo por cada BANDERA ROJA.
+usuarios_vs_politica() {
+  local f="$1" b="$2" u o l m n=0 cand
+  : >"$b"
+  cand="$(usuarios_candidatos | usuarios_unificar)"
+  { printf '## usuarios con cuenta, poder o rastro de acceso (usuario|origen)\n%s\n\n' "$cand"; } >>"$f"
+  printf '\n== USUARIOS vs LISTA AUTORIZADA FIBEX (hasta nuevo aviso) ==\n'
+  printf 'PAM: %s\nIPA: %s\n' "$USUARIOS_PAM_AUTORIZADOS" "$USUARIOS_IPA_AUTORIZADOS"
+  while IFS='|' read -r u o; do
+    [ -n "$u" ] || continue
+    case "$o" in
+      *ALIAS-sudoers*) printf 'REVISAR A MANO: %s es un alias de sudoers; ver quién lo compone en 02-root-acceso.txt\n' "$u" ;;
+      *) if l="$(usuario_autorizado "$u")"; then printf 'AUTORIZADO(%s) %s [origen: %s]\n' "$l" "$u" "$o"
+         else
+           m="no está en la lista autorizada [origen: $o]"
+           printf 'BANDERA ROJA: %s %s\n' "$u" "$m"; printf '%s|%s\n' "$u" "$m" >>"$b"; n=$((n+1))
+         fi ;;
+    esac
+  done <<<"$cand"
+  while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    printf 'BANDERA ROJA: root %s\n' "$m"; printf 'root|%s\n' "$m" >>"$b"; n=$((n+1))
+  done < <(root_activo)
+  printf 'BANDERAS_ROJAS=%s\n' "$n"
+  printf 'MANUAL(FreeIPA): las reglas sudo/HBAC del dominio no se ven desde el host; revisar en el servidor IPA quién llega a root.\n'
+}
+
 # --- paso 2: acceso a root (quién lo habilitó) --------------------------------
 # Solo lectura. Reúne: estado efectivo, línea de tiempo de archivos, y rastros
 # de quién los tocó (logs, auditd, historiales). Sin auditd/logs viejos el
@@ -230,6 +332,7 @@ paso_02_root() {
       *) printf 'INDETERMINADO por fuentes del host: sin auditd con reglas no hay atribución fiable. Pistas débiles: ctime de archivos (CUÁNDO, no QUIÉN), sudo en auth.log/journal (solo si no se usó una shell previa: sudo -i / su registran la shell, no lo hecho dentro), historiales (editables). Con FreeIPA/LDAP revisar además el servidor.\n' ;;
     esac
   } >"$r"
+  usuarios_vs_politica "$f" "$EVID/.banderas-rojas" >>"$r"
   ESTADO[2]="ok"
   say "Paso 2 listo → $f"; cat "$r"
 }

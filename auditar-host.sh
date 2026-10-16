@@ -11,7 +11,7 @@
 set -u
 set -o pipefail
 
-LANZADOR_VERSION="0.2.0"
+LANZADOR_VERSION="0.3.0"
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$AQUI/auditoria-root-acceso.sh"
 VENDOR="$AQUI/vendor"
@@ -97,6 +97,11 @@ else RESULTADO="FALLO"; printf 'FALLO: pasos sin ejecutar: %s\n' "${SIN:-no se p
 printf 'Resumen del paso 1 (informativo):\n'
 tar -xzOf "$DEST/$NAME" --wildcards '*/01-preflight.txt' 2>/dev/null \
   | grep -E '^(FREEIPA|ZABBIX_AGENT|GLPI_AGENT)=|^POLITICA_FIBEX' | sed 's/^/  /'
+printf 'Usuarios vs lista autorizada (paso 2):\n'
+BAN="$(tar -xzOf "$DEST/$NAME" --wildcards '*/02-resumen.txt' 2>/dev/null | grep -E '^(BANDERA ROJA|BANDERAS_ROJAS=)')"
+if [ -n "$BAN" ]; then printf '%s\n' "$BAN" | sed 's/^/  /'
+else printf '  (el paquete no trae esta comprobación: script anterior a 0.11.0)\n'; fi
+NBAN="$(printf '%s\n' "$BAN" | sed -n 's/^BANDERAS_ROJAS=//p')"
 
 ENTREGADO=1
 if [ "$RESULTADO" = "OK" ] && [ -z "$EDEST" ]; then
@@ -134,6 +139,10 @@ printf '\n=== RESULTADO: %s ===\n' "$RESULTADO"
 if [ "$RESULTADO" = "OK" ]; then
   printf 'Paquete: %s/%s\n' "$DEST" "$NAME"
   printf '%s\n' "$LIMPIEZA"
+  case "$NBAN" in
+    ""|0|*[!0-9]*) ;;
+    *) printf 'ATENCIÓN: %s BANDERA(S) ROJA(S) (usuarios fuera de la lista autorizada o root activo). Avisa a Freddy antes de cerrar el caso.\n' "$NBAN" ;;
+  esac
   printf 'Es confidencial: contiene datos sensibles del host.\n'
   exit 0
 fi

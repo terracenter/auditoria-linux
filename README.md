@@ -5,8 +5,8 @@ Hay tres piezas; usa la que corresponda:
 
 | Script | Para qué | Estado |
 |---|---|---|
-| `auditar-host.sh` | **Lanzador**: audita un host remoto con un solo comando (copia, ejecuta con sudo, trae y verifica el paquete). Es lo que usa soporte N1. | v0.2.0 `[BORRADOR]` |
-| `auditoria-root-acceso.sh` | Seguridad básica con menú: **quién habilitó root por SSH**, SSH, sudo/PAM, firewall, Fail2ban, Lynis. Criterio CIS Level 2. | v0.10.0 `[BORRADOR]` |
+| `auditar-host.sh` | **Lanzador**: audita un host remoto con un solo comando (copia, ejecuta con sudo, trae y verifica el paquete). Es lo que usa soporte N1. | v0.3.0 `[BORRADOR]` |
+| `auditoria-root-acceso.sh` | Seguridad básica con menú: **quién habilitó root por SSH**, SSH, sudo/PAM, firewall, Fail2ban, Lynis. Criterio CIS Level 2. | v0.11.0 `[BORRADOR]` |
 | `auditoria-host-linux.sh` | Auditoría completa de 7 fases (inventario, red, logs, backups…) según la plantilla del vault. | previo |
 
 Documentación viva en el vault: `Obsidian/04.Documentacion/05.Seguridad/Auditoria/` (manual operativo,
@@ -24,7 +24,7 @@ entrada en el log de sudo.
 | # | Paso | Qué revisa |
 |---|---|---|
 | 1 | Preflight | SO, red, FreeIPA/sssd, **Zabbix agent y cliente GLPI** (política Fibex: ambos activos en cada host), servicios en escucha, herramientas |
-| 2 | Acceso a root | `sshd -T` efectivo (Match, drop-ins), authorized_keys, UID 0, línea de tiempo de archivos, logs/auditd: **quién lo habilitó** |
+| 2 | Acceso a root | `sshd -T` efectivo (Match, drop-ins), authorized_keys, UID 0, línea de tiempo de archivos, logs/auditd: **quién lo habilitó** y **usuarios vs lista autorizada de Fibex** (BANDERA ROJA: root activo o cualquier usuario fuera de la lista) |
 | 3 | SSH | 25 reglas CIS L2 sobre la configuración efectiva |
 | 4 | sudo / PAM / su | sudoers, `pam_wheel`, faillock, pwquality, permisos de `/etc/shadow` |
 | 5 | Firewall | nftables / ufw / firewalld / iptables |
@@ -54,6 +54,7 @@ y la de `sudo` de tu usuario; no guarda contraseñas ni llaves. Opciones: `-d DI
   **borra solo del host** lo que él copió y generó en `~/auditoria/`; no pregunta si borrar (sí pregunta a dónde enviar el paquete). Entrega a Freddy el `.tar.gz` que indica
   la última línea.
 - **`RESULTADO: FALLO`**: no entregues el paquete; en el host no se borra nada. Guarda la salida completa y avisa.
+- **`ATENCIÓN: N BANDERA(S) ROJA(S)`**: el lanzador muestra qué usuarios están fuera de la lista autorizada (PAM: freddy, manuel, angel, levy, deudes; IPA: ftaborda, mpernia, anava, lrivero, dlinares) o si root está activo. No es un fallo de la auditoría: avisa a Freddy y no toques nada en el host. Las listas se editan solo en `auditoria-root-acceso.sh` (`USUARIOS_PAM_AUTORIZADOS`, `USUARIOS_IPA_AUTORIZADOS`).
 - El script de auditoría imprime al final «Para copiarlo: sudo chown…»: **ignóralo**, el lanzador ya lo hace.
 
 Reglas para soporte N1:
@@ -105,7 +106,8 @@ Mismo resultado en pasos sueltos. Solo si el lanzador no sirve en tu entorno.
 Sin red ni host real (usan `ssh`, `scp`, `sudo` e `id` falsos que solo copian entre carpetas locales):
 
 ```bash
-./tests/test-lanzador.sh   # 36 pruebas del lanzador
+./tests/test-lanzador.sh   # 39 pruebas del lanzador
+./tests/test-usuarios.sh    # 32 pruebas de la política de usuarios (BANDERA ROJA)
 ./tests/test-agentes.sh    # 13 pruebas de la detección de Zabbix/GLPI (corre una auditoría completa; tarda)
 ```
 
@@ -113,6 +115,7 @@ Cada prueba se comprobó rompiendo a propósito el código y viendo que falla. N
 
 ### No validado todavía [D]
 - Análisis del primer paquete real (`pve-valencia-noc-viejo`, 2026-10-16): el lanzador 0.1.0 y los 8 pasos corrieron con SSH y root reales (según la salida de Freddy), pero el contenido del paquete aún no se ha revisado contra CIS L2. La limpieza automática del host de 0.2.0 sí se probó con SSH real (2026-10-16, según la salida de Freddy); la pregunta de envío y `-e` solo con ssh/scp falsos.
+- La política de usuarios (BANDERA ROJA) solo se probó con comandos falsos; falta correrla con root real en `pve-valencia-noc-viejo`. La ortografía de `deudes` en la lista PAM la confirma Freddy.
 - CentOS 7 y Debian 12.
 - Huella de la llave de CISOfy contra la publicada por CISOfy.
 - Fechas EOL de algunas distribuciones.
