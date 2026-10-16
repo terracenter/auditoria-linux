@@ -7,9 +7,9 @@ Hay dos herramientas; usa la que corresponda:
 |---|---|---|
 | `auditoria-root-acceso.sh` | Seguridad básica con menú: **quién habilitó root por SSH**, SSH, sudo/PAM, firewall, Fail2ban, Lynis. Criterio CIS Level 2. | v0.9.0 `[BORRADOR]` |
 | `auditoria-host-linux.sh` | Auditoría completa de 7 fases (inventario, red, logs, backups…) según la plantilla del vault. | previo |
+
 Documentación viva en el vault: `Obsidian/04.Documentacion/05.Seguridad/Auditoria/` (manual operativo,
 ROADMAP, task log y development log).
-y `Obsidian/04.Documentacion/05.Seguridad/Auditoria/` (manual operativo).
 
 ## auditoria-root-acceso.sh
 
