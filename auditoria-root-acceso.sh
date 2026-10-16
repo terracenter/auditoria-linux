@@ -341,10 +341,15 @@ paso_05_firewall() {
   local ipt
   for ipt in iptables ip6tables; do
     have "$ipt" || continue
+    # Solo backend legacy cargado: `iptables -S` podría cargar módulos del kernel en otro caso.
+    # Con iptables-nft las reglas ya se evalúan por nft (ver arriba).
+    local tf=/proc/net/ip_tables_names; [ "$ipt" = ip6tables ] && tf=/proc/net/ip6_tables_names
+    [ -e "$tf" ] || { printf "%s: sin backend legacy cargado (se evalúa por nft)\n" "$ipt" >>"$f"; continue; }
     run "$f" "$ipt" -S
     local pr; pr="$("$ipt" -S 2>/dev/null | awk '$1=="-P"&&$2=="INPUT"{print $3}')"
     if [ -n "$pr" ]; then
-      [ "$("$ipt" -S 2>/dev/null | grep -c '^-A')" -gt 0 ] || [ "$pr" = DROP ] && act=$((act+1))
+      # Cuentan solo reglas propias de INPUT (no las de fail2ban/docker/tailscale)
+      [ "$("$ipt" -S INPUT 2>/dev/null | grep '^-A' | grep -vcE 'f2b-|DOCKER|ts-input')" -gt 0 ] || [ "$pr" = DROP ] && act=$((act+1))
       [ "$pr" = DROP ] || [ "$pr" = REJECT ] \
         && { pol_ok=1; chk "$ipt INPUT policy DROP" OK ""; } \
         || chk "$ipt INPUT policy DROP" FAIL "policy=$pr (si hay DROP final por regla, validar a mano)"
@@ -379,7 +384,7 @@ paso_05_firewall() {
   fi
 
   [ "$act" -ge 1 ] && chk "firewall activo (motores: $act)" OK "" || chk "firewall activo" FAIL "ningún motor con reglas/activo"
-  [ "$act" -gt 2 ] && chk "un solo motor gestionando" FAIL "$act motores activos: riesgo de conflicto"
+  [ "$act" -gt 2 ] && chk "motores activos <=2" FAIL "$act motores activos: riesgo de conflicto/solapamiento"
   [ "$pol_ok" -eq 1 ] || chk "política por defecto deny entrante" FAIL "ninguna política DROP/deny detectada"
 
   # Escucha no-loopback (cruce manual con reglas: exposición real)
@@ -414,7 +419,7 @@ paso_06_fail2ban() {
     && chk "fail2ban habilitado al arranque" OK "" || chk "fail2ban habilitado al arranque" FAIL ""
 
   # Jaulas activas y su configuración efectiva
-  local jails j
+  local jails j k
   jails="$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr -d ',')"
   for j in $jails; do
     run "$f" fail2ban-client status "$j"
@@ -425,9 +430,14 @@ paso_06_fail2ban() {
   [ -n "$jails" ] && chk "jaulas activas" OK "$(printf '%s' "$jails" | wc -w): $jails" || chk "jaulas activas" FAIL "ninguna"
 
   # ignoreip: rangos amplios anulan la protección
-  local ig; ig="$(fail2ban-client get "$(printf '%s' "$jails" | awk '{print $1}')" ignoreip 2>/dev/null | tr '\n' ' ')"
-  [ -n "$jails" ] && printf '%s' "$ig" | grep -qE '(^|[ ,])(0\.0\.0\.0/0|10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16)' \
-    && chk "ignoreip sin rangos amplios" FAIL "$ig" || chk "ignoreip sin rangos amplios" OK "$ig"
+  local ig="" bw=""
+  for j in $jails; do
+    ig="$(fail2ban-client get "$j" ignoreip 2>/dev/null | tr '\n' ' ')"
+    printf '%s' "$ig" | grep -qE '(^|[ ,])(0\.0\.0\.0/0|10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16)' && bw="$bw $j"
+  done
+  if [ -z "$jails" ]; then chk "ignoreip sin rangos amplios" NODET "sin jaulas"
+  elif [ -n "$bw" ]; then chk "ignoreip sin rangos amplios" FAIL "rangos amplios en:$bw"
+  else chk "ignoreip sin rangos amplios" OK ""; fi
 
   # Cruce servicio en escucha -> jaula esperada (proceso:jaulas aceptables)
   local procs map p want hit
