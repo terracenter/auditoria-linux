@@ -29,7 +29,9 @@ fi
 HOST="$(hostname -s 2>/dev/null || echo desconocido)"
 TS="$(date +%Y%m%d-%H%M%S)"
 EVID="$OUT_BASE/auditoria-root-${HOST}-${TS}"
-mkdir -p "$EVID" && chmod 700 "$EVID" || { echo "No puedo crear $EVID" >&2; exit 1; }
+umask 077   # evidencia y paquete solo legibles por root desde su creación
+[ -L "$OUT_BASE" ] && { echo "$OUT_BASE es un symlink: abortando" >&2; exit 1; }
+mkdir -p "$OUT_BASE" && mkdir "$EVID" || { echo "No puedo crear $EVID" >&2; exit 1; }
 
 # --- utilidades -------------------------------------------------------------
 declare -A ESTADO   # paso -> pendiente|ok|parcial
@@ -439,24 +441,30 @@ paso_07_lynis() {
   printf '== Lynis (%s) ==\n%-44s %-8s %s\n' "$HOST" CONTROL ESTADO DETALLE >"$r"
   local here v tb
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; v="$here/vendor/lynis"
-  tb="$(ls "$v"/lynis-*.tar.gz 2>/dev/null | head -1)"
+  # Valores FIJADOS en el script: el archivo verificado es exactamente el que se ejecuta.
+  local LY_TGZ="lynis-3.1.7.tar.gz" LY_SHA="b5314a07fd85fa3ffc7da57b508f0108ec3280d84e4af823f805d95cbbc2428c"
+  local LY_FPR="84FAA9983B24AEF24D6C87F1FEBB7D1812576482"
+  tb="$v/$LY_TGZ"; [ -f "$tb" ] || tb=""
   if [ -z "$tb" ]; then
-    chk "tarball vendorizado presente" FAIL "falta $v/lynis-*.tar.gz: copiar vendor/lynis/ junto al script (o instalar Lynis oficial y validar versión)"
+    chk "tarball vendorizado presente" FAIL "falta $v/lynis-3.1.7.tar.gz: copiar vendor/lynis/ junto al script (o instalar Lynis oficial y validar versión)"
     ESTADO[7]="ok"; say "Paso 7: sin Lynis → $r"; cat "$r"; return
   fi
   chk "tarball vendorizado presente" OK "$(basename "$tb")"
 
-  # Integridad
-  if ( cd "$v" && sha256sum -c SHA256SUMS >>"$f" 2>&1 ); then chk "SHA256 del tarball" OK ""
-  else chk "SHA256 del tarball" FAIL "no coincide con SHA256SUMS: NO se ejecuta"; ESTADO[7]="ok"; say "Paso 7: integridad fallida"; cat "$r"; return; fi
-  # Firma GPG (keyring aislado; no toca el del host)
-  if have gpg && [ -f "$tb.asc" ] && [ -f "$v/cisofy-software.pub" ]; then
-    local gh="$EVID/.gnupg"; mkdir -p "$gh" && chmod 700 "$gh"
-    GNUPGHOME="$gh" gpg --batch --quiet --import "$v/cisofy-software.pub" >>"$f" 2>&1
-    if GNUPGHOME="$gh" gpg --batch --verify "$tb.asc" "$tb" >>"$f" 2>&1; then
-      chk "firma GPG del tarball" OK "huella: ver README [D] pendiente de confirmar con CISOfy"
-    else chk "firma GPG del tarball" FAIL "firma inválida: NO se ejecuta"; ESTADO[7]="ok"; cat "$r"; return; fi
-  else chk "firma GPG del tarball" NODET "gpg ausente o falta .asc/.pub (solo SHA256 verificado)"; fi
+  # Integridad: SHA256 fijado en el script (no se confía en SHA256SUMS de la misma carpeta).
+  if [ "$(sha256sum "$tb" | cut -d' ' -f1)" = "$LY_SHA" ]; then chk "SHA256 del tarball (fijado)" OK ""
+  else chk "SHA256 del tarball (fijado)" FAIL "no coincide con el valor fijado: NO se ejecuta"; ESTADO[7]="ok"; say "Paso 7: integridad fallida"; cat "$r"; return; fi
+  # Firma GPG OBLIGATORIA: keyring aislado, huella primaria fijada (VALIDSIG).
+  if ! have gpg || [ ! -f "$tb.asc" ] || [ ! -f "$v/cisofy-software.pub" ]; then
+    chk "firma GPG del tarball" FAIL "falta gpg, .asc o .pub: NO se ejecuta (instalar gpg en el host o verificar fuera de línea)"; ESTADO[7]="ok"; cat "$r"; return
+  fi
+  local gh="$EVID/.gnupg" st; mkdir -p "$gh" && chmod 700 "$gh"
+  GNUPGHOME="$gh" gpg --batch --quiet --import "$v/cisofy-software.pub" >>"$f" 2>&1
+  st="$(GNUPGHOME="$gh" gpg --batch --status-fd 1 --verify "$tb.asc" "$tb" 2>>"$f")"
+  GNUPGHOME="$gh" gpgconf --kill all >/dev/null 2>&1; rm -rf "$gh"
+  printf '%s\n' "$st" >>"$f"
+  if printf '%s\n' "$st" | grep -qE "^\[GNUPG:\] VALIDSIG .* ${LY_FPR}\$"; then chk "firma GPG (huella fijada)" OK "$LY_FPR [D] huella por confirmar con CISOfy"
+  else chk "firma GPG (huella fijada)" FAIL "firma inválida o huella distinta: NO se ejecuta"; ESTADO[7]="ok"; cat "$r"; return; fi
 
   # Extracción en la carpeta de evidencia (root, sin heredar dueños)
   local d="$EVID/lynis-run"; mkdir -p "$d" && tar -xzf "$tb" -C "$d" --no-same-owner >>"$f" 2>&1 \
@@ -476,9 +484,13 @@ paso_07_lynis() {
   esac
   local bv; bv="$(bash --version | head -1)"; printf 'bash: %s\n' "$bv" >>"$f"
 
+  # Perfil propio: sin consulta DNS de versión (skip-upgrade-test), sin pruebas que salen a red
+  # (NETW-2705 dig a nameservers) ni refrescan metadatos (PKGS-7383 yum repolist).
+  # Lynis AÚN escribe /var/run/lynis.pid y temporales en /tmp (se borran al terminar); no modifica config.
+  cp "$ly/default.prf" "$ly/auditoria.prf" && printf '\nskip-upgrade-test=yes\nskip-test=NETW-2705\nskip-test=PKGS-7383\n' >>"$ly/auditoria.prf"
   # Ejecución (solo lectura; logs y reporte en la evidencia)
   local rep="$EVID/lynis-report.dat" lg="$EVID/lynis.log"
-  ( cd "$ly" && ./lynis audit system --no-colors --quiet --profile "$ly/default.prf" \
+  ( cd "$ly" && ./lynis audit system --no-colors --quiet --profile "$ly/auditoria.prf" \
       --logfile "$lg" --report-file "$rep" ) </dev/null >"$EVID/07-lynis-stdout.txt" 2>&1
   local rc=$?; printf 'lynis rc=%s\n' "$rc" >>"$f"
   if [ ! -s "$rep" ]; then chk "ejecución de Lynis" FAIL "sin reporte (rc=$rc): ver 07-lynis-stdout.txt"
