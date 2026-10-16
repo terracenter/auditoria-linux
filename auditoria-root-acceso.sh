@@ -2,12 +2,15 @@
 # auditoria-root-acceso.sh — menú de auditoría de seguridad básica (SOLO LECTURA)
 # Prioridad: determinar quién habilitó el acceso root por SSH.
 # Uso: sudo ./auditoria-root-acceso.sh [--all] [-o DIR]
-# No instala paquetes, no modifica configuración, no toca la red.
+# No instala paquetes, no modifica configuración, no toca la red. Excepciones declaradas:
+#  - Lynis escribe /var/run/lynis.pid y temporales en /tmp (se borran al terminar).
+#  - `sudo -l -U root` (solo con FreeIPA/sssd) deja una entrada en el log de sudo.
+# Nota: el [rc=N] de la evidencia es el del último comando de un pipe, no de todo el pipe.
 set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.8.0-paso8"
+VERSION="0.9.0-revision-opus"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -52,7 +55,7 @@ paso_01_preflight() {
   run "$f" cat /etc/os-release
   run "$f" id
   run "$f" uptime
-  run "$f" ip -br addr
+  run "$f" bash -c "ip -br addr 2>/dev/null || ip addr"
   have systemctl && run "$f" systemctl is-system-running
 
   # FreeIPA: se decide por evidencia, no por suposición.
@@ -266,7 +269,7 @@ paso_04_sudo() {
   run "$f" bash -c 'getent passwd root; passwd -S root 2>&1; chage -l root 2>&1'
   run "$f" bash -c 'cat /etc/securetty 2>&1 | head -n 20'
   run "$f" bash -c 'grep -nE "TMOUT|umask|^(export )?PATH" /root/.bashrc /root/.profile /etc/profile /etc/profile.d/* /etc/bash.bashrc /etc/bashrc 2>&1'
-  run "$f" bash -c 'echo "PATH de root:"; sudo -n env 2>/dev/null | grep ^PATH; echo "$PATH" | tr ":" "\n" | grep -nE "^\.?$|^\." '
+  run "$f" bash -c 'echo "PATH de root:"; echo "$PATH" | tr ":" "\n" | grep -nE "^\.?$|^\." '
   # Cuentas
   run "$f" bash -c 'awk -F: "(\$2==\"\" ){print \"SIN PASSWORD: \" \$1}" /etc/shadow 2>&1'
   run "$f" bash -c 'awk -F: "\$3==0{print \"UID0: \" \$1}" /etc/passwd; cut -d: -f3 /etc/passwd | sort | uniq -d | sed "s/^/UID duplicado: /"'
