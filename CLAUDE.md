@@ -6,7 +6,7 @@
 ## Alcance
 
 Scripts de auditoría de solo lectura para hosts Linux de Fibex y la evidencia vendorizada que necesitan (`vendor/lynis/`).
-Herramientas: `auditoria-root-acceso.sh` (seguridad básica, CIS L2) y `auditoria-host-linux.sh` (auditoría completa de 7 fases).
+Herramientas: `auditar-host.sh` (lanzador para soporte N1), `auditoria-root-acceso.sh` (seguridad básica, CIS L2) y `auditoria-host-linux.sh` (auditoría completa de 7 fases). Pruebas en `tests/` (sin red ni root).
 
 ## Reglas específicas
 

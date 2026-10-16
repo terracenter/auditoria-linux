@@ -1,11 +1,12 @@
 # auditoria-linux
 
 Scripts de auditoría **read-only** para hosts Linux (Ubuntu/Debian/RHEL family).
-Hay dos herramientas; usa la que corresponda:
+Hay tres piezas; usa la que corresponda:
 
 | Script | Para qué | Estado |
 |---|---|---|
-| `auditoria-root-acceso.sh` | Seguridad básica con menú: **quién habilitó root por SSH**, SSH, sudo/PAM, firewall, Fail2ban, Lynis. Criterio CIS Level 2. | v0.9.0 `[BORRADOR]` |
+| `auditar-host.sh` | **Lanzador**: audita un host remoto con un solo comando (copia, ejecuta con sudo, trae y verifica el paquete). Es lo que usa soporte N1. | v0.1.0 `[BORRADOR]` |
+| `auditoria-root-acceso.sh` | Seguridad básica con menú: **quién habilitó root por SSH**, SSH, sudo/PAM, firewall, Fail2ban, Lynis. Criterio CIS Level 2. | v0.10.0 `[BORRADOR]` |
 | `auditoria-host-linux.sh` | Auditoría completa de 7 fases (inventario, red, logs, backups…) según la plantilla del vault. | previo |
 
 Documentación viva en el vault: `Obsidian/04.Documentacion/05.Seguridad/Auditoria/` (manual operativo,
@@ -36,7 +37,33 @@ por defecto el directorio actual), `-h`.
 
 ### Procedimiento para iniciar una auditoría (soporte nivel 1)
 
-Necesitas: acceso SSH al host con un usuario con `sudo`, y el repo actualizado en tu equipo.
+Necesitas: acceso SSH al host con un usuario con `sudo` (te pedirá su contraseña) y el repo en tu equipo.
+
+```bash
+cd ~/Workspace/Desarrollo/auditoria-linux && git pull   # es Desarrollo/auditoria-linux, no Desarrollo/scripts
+./auditar-host.sh usuario@host                          # o usuario@IP
+```
+
+El lanzador corre en **tu equipo** y hace todo: copia el script y `vendor/` al host, ejecuta la auditoría
+con `sudo` (los 8 pasos), trae el `.tar.gz`, verifica el SHA256, comprueba que no falte ningún paso y
+termina con `=== RESULTADO: OK ===` o `=== RESULTADO: FALLO ===`. Te pide la contraseña de SSH una sola vez
+y la de `sudo` de tu usuario; no guarda contraseñas ni llaves. Opción `-d DIR`: carpeta local donde dejar el paquete
+(por defecto, la carpeta actual).
+
+- **`RESULTADO: OK`**: entrega a Freddy el `.tar.gz` que indica la última línea. Responde `s` solo si quieres borrar
+  `~/auditoria/` del host (ya tienes el paquete verificado); si dudas, responde `N` y bórralo cuando Freddy confirme.
+- **`RESULTADO: FALLO`**: no entregues el paquete; guarda la salida completa y avisa.
+- El script de auditoría imprime al final «Para copiarlo: sudo chown…»: **ignóralo**, el lanzador ya lo hace.
+
+Reglas para soporte N1:
+- **No corrijas nada** en el host aunque el script marque FAIL. Las correcciones las aprueba Freddy.
+- Si el host no tiene `gpg`, Lynis no se ejecuta (es intencional); anótalo y continúa con el resto.
+- Si el script falla o da un error que no entiendes, guarda el mensaje completo y avisa; no lo modifiques.
+- El paquete contiene configuración del host: trátalo como confidencial.
+
+### Alternativa manual (sin el lanzador)
+
+Mismo resultado en pasos sueltos. Solo si el lanzador no sirve en tu entorno.
 
 1. **En tu equipo**, actualiza el repo: `cd ~/Workspace/Desarrollo/auditoria-linux && git pull` (es `Desarrollo/auditoria-linux`, no `Desarrollo/scripts`).
 2. **Copia al host** el script **y** la carpeta `vendor/` (sin `vendor/lynis/` el paso 7 falla):
@@ -71,14 +98,20 @@ Necesitas: acceso SSH al host con un usuario con `sudo`, y el repo actualizado e
 7. **Entrégalo a Freddy**: él (con el agente) analiza contra CIS L2 y crea la nota del host en el vault.
 8. **Limpia el host**: borra `~/auditoria/` solo cuando Freddy confirme que recibió el paquete.
 
-Reglas para soporte N1:
-- **No corrijas nada** en el host aunque el script marque FAIL. Las correcciones las aprueba Freddy.
-- Si el host no tiene `gpg`, Lynis no se ejecuta (es intencional); anótalo y continúa con el resto.
-- Si el script falla o da un error que no entiendes, guarda el mensaje completo y avisa; no lo modifiques.
-- El paquete contiene configuración del host: trátalo como confidencial.
+
+### Tests
+
+Sin red ni host real (usan `ssh`, `scp`, `sudo` e `id` falsos que solo copian entre carpetas locales):
+
+```bash
+./tests/test-lanzador.sh   # 21 pruebas del lanzador
+./tests/test-agentes.sh    # 13 pruebas de la detección de Zabbix/GLPI (corre una auditoría completa; tarda)
+```
+
+Cada prueba se comprobó rompiendo a propósito el código y viendo que falla. No sustituyen la prueba en un host real.
 
 ### No validado todavía [D]
-- Ejecución con root real en un host real (el primer host es la prueba de campo).
+- Ejecución con root real en un host real, y el lanzador `auditar-host.sh` con SSH real (el primer host es la prueba de campo; hasta ahora solo con ssh/scp falsos).
 - CentOS 7 y Debian 12.
 - Huella de la llave de CISOfy contra la publicada por CISOfy.
 - Fechas EOL de algunas distribuciones.

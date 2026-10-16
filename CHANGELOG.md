@@ -6,6 +6,10 @@ El formato sigue Keep a Changelog y versionado semántico cuando aplique.
 
 ## [Unreleased]
 
+### Added (0.11.0)
+- `auditar-host.sh` 0.1.0 (`[BORRADOR]`): lanzador de un solo comando para soporte nivel 1. Corre en el equipo del operador: copia el script y `vendor/` al host, ejecuta la auditoría con `sudo` de su usuario, trae el `.tar.gz`, verifica SHA256 y que los 8 pasos se ejecutaron, y termina con `RESULTADO: OK` o `FALLO`. Reutiliza una sola conexión SSH, valida el destino y no guarda credenciales. Probado solo con ssh/scp falsos; falta SSH real.
+- `tests/test-lanzador.sh` (21 pruebas) y `tests/test-agentes.sh` (13 pruebas): sin red ni host real, con comandos falsos; verificadas por mutación.
+
 ### Added (0.10.0)
 - Paso 1: detecta Zabbix agent (`zabbix-agent2`/`zabbix-agent`) y cliente GLPI (`glpi-agent`) por paquete, binario, unidad systemd y configuración. Estados `activo`, `instalado-inactivo` o `no`; deja `.zabbix` y `.glpi` en la evidencia y la línea `POLITICA_FIBEX` en `01-preflight.txt`; avisa si alguno no está activo. De la configuración solo copia directivas no secretas (sin PSK, usuarios, contraseñas ni proxy) y enmascara credenciales dentro de URLs.
 
