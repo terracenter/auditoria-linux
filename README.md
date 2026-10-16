@@ -47,7 +47,7 @@ cd ~/Workspace/Desarrollo/auditoria-linux && git pull   # es Desarrollo/auditori
 El lanzador corre en **tu equipo** y hace todo: copia el script y `vendor/` al host, ejecuta la auditoría
 con `sudo` (los 8 pasos), trae el `.tar.gz`, verifica el SHA256, comprueba que no falte ningún paso y
 termina con `=== RESULTADO: OK ===` o `=== RESULTADO: FALLO ===`. Te pide la contraseña de SSH una sola vez
-y la de `sudo` de tu usuario; no guarda contraseñas ni llaves. Opciones: `-d DIR` (carpeta local donde dejar el paquete; por defecto, la carpeta actual) y
+y la de `sudo` de tu usuario; no guarda contraseñas ni llaves. Opciones: `-d DIR` (carpeta local donde dejar el paquete; por defecto, `auditorias/` junto al lanzador, que se crea sola con permisos 700) y
 `-e usuario@servidor:ruta` (envía el paquete por `scp` y verifica allí el SHA256). Si no das `-e`, al terminar te pregunta a dónde enviarlo; Enter = no enviar.
 
 - **`RESULTADO: OK`**: el paquete está verificado en tu equipo (y en el destino de `-e`, si lo diste). El lanzador
@@ -105,7 +105,7 @@ Mismo resultado en pasos sueltos. Solo si el lanzador no sirve en tu entorno.
 Sin red ni host real (usan `ssh`, `scp`, `sudo` e `id` falsos que solo copian entre carpetas locales):
 
 ```bash
-./tests/test-lanzador.sh   # 35 pruebas del lanzador
+./tests/test-lanzador.sh   # 36 pruebas del lanzador
 ./tests/test-agentes.sh    # 13 pruebas de la detección de Zabbix/GLPI (corre una auditoría completa; tarda)
 ```
 

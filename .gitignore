@@ -3,3 +3,4 @@ auditoria-*/
 reportes/
 *.log
 .DS_Store
+auditorias/

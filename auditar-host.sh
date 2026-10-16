@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # auditar-host.sh — lanzador: audita un host remoto con auditoria-root-acceso.sh en un solo comando.
 # Uso: ./auditar-host.sh [-d DIR] [-e DESTINO] [usuario@]host-o-ip
-#   -d DIR      carpeta local donde dejar el paquete (por defecto, la carpeta actual)
+#   -d DIR      carpeta local donde dejar el paquete (por defecto, auditorias/ junto al lanzador)
 #   -e DESTINO  envía el paquete por scp a DESTINO (usuario@servidor:ruta); si no lo das, te pregunta
 # Corre en TU equipo, no en el host. Copia el script y vendor/, lo ejecuta por SSH con el
 # sudo de TU usuario (te pedirá su contraseña), trae el .tar.gz, verifica el SHA256 y
@@ -15,7 +15,7 @@ LANZADOR_VERSION="0.2.0"
 AQUI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$AQUI/auditoria-root-acceso.sh"
 VENDOR="$AQUI/vendor"
-DEST="$PWD"
+DEST=""
 
 uso() { sed -n "2,9p" "$0"; }
 die() { printf 'FALLO: %s\n' "$*" >&2; exit 1; }
@@ -49,6 +49,11 @@ for c in ssh scp sha256sum tar mktemp; do
 done
 [ -f "$SCRIPT" ] || die "no encuentro $SCRIPT: ejecuta el lanzador desde la carpeta del repo"
 [ -d "$VENDOR/lynis" ] || die "no encuentro $VENDOR/lynis: sin Lynis el paso 7 falla"
+if [ -z "$DEST" ]; then
+  DEST="$AQUI/auditorias"
+  [ -L "$DEST" ] && die "auditorias/ es un symlink: $DEST"
+  mkdir -p "$DEST" && chmod 700 "$DEST" || die "no puedo crear $DEST"
+fi
 [ -d "$DEST" ] && [ ! -L "$DEST" ] || die "la carpeta de destino no existe o es un symlink: $DEST"
 
 TS="$(date +%Y%m%d-%H%M%S)"

@@ -39,6 +39,7 @@ cat >"$T/fb/scp" <<'EOF'
 echo "scp $*" >>"$FAKE_LOG"
 args=(); while [ $# -gt 0 ]; do case "$1" in -o) shift 2;; -q|-r) shift;; *) args+=("$1"); shift;; esac; done
 n=${#args[@]}; dest="${args[$((n-1))]}"
+case "$dest" in /*|*:*) ;; *) echo "scp falso: destino relativo $dest" >&2; exit 99;; esac
 [ "${FAKE_E_FAIL:-0}" = 1 ] && case "$dest" in entrega@*) exit 1;; esac
 map() { case "$1" in *:*) echo "$FAKEHOME/${1#*:}";; *) echo "$1";; esac; }
 d="$(map "$dest")"; mkdir -p "$d"
@@ -92,6 +93,11 @@ rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza 'entrega@srv:entrega' env FAK
 check "pregunta: envío falla, FALLO y host intacto" "[ $rc -eq 1 ] && grep -q 'RESULTADO: FALLO' '$T/out' && [ -d '$T/home/auditoria/vendor' ]"
 rm -f "$T/dest/"*; lanza 'entrega@srv:entrega' env STUB_FALTAN=7 "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
 check "pregunta: con FALLO previo no pregunta" "[ $rc -eq 1 ] && ! grep -q 'A dónde enviar' '$T/out'"
+
+# 3c. sin -d: deja el paquete en auditorias/ junto al lanzador (no en la carpeta actual)
+rm -rf "$T/repo/auditorias"; mkdir -p "$T/cwd"; : >"$T/log"
+( cd "$T/cwd" && printf '\n' | env PATH="$T/fb:$PATH" FAKEHOME="$T/home" FAKE_LOG="$T/log" "$LANZ" u@10.0.0.9 >"$T/out" 2>&1 ); rc=$?
+check "sin -d: paquete en auditorias/ y nada en la carpeta actual" "[ $rc -eq 0 ] && ls '$T/repo/auditorias'/auditoria-root-*.tar.gz >/dev/null 2>&1 && [ \"\$(stat -c %a '$T/repo/auditorias')\" = 700 ] && [ -z \"\$(ls -A '$T/cwd')\" ]"
 
 # 4. -e falla al enviar: FALLO, exit 1, el host NO se limpia
 rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza "" env FAKE_E_FAIL=1 "$LANZ" -d "$T/dest" -e entrega@srv:entrega u@10.0.0.9 </dev/null; rc=$?
