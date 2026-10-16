@@ -57,7 +57,8 @@ paso_01_preflight() {
 
   # FreeIPA: se decide por evidencia, no por suposición.
   local ipa="no"
-  { [ -f /etc/ipa/default.conf ] || have ipa-client-install || have ipa; } && ipa="si"
+  [ -f /etc/ipa/default.conf ] && ipa="si"   # enrolado (el paquete solo no basta)
+  [ -f /etc/sssd/sssd.conf ] && run "$f" bash -c 'grep -E "^(\[|id_provider|auth_provider|access_provider|sudo_provider|ipa_domain|ldap_uri)" /etc/sssd/sssd.conf 2>&1'
   have sssctl && run "$f" sssctl domain-list
   [ -f /etc/ipa/default.conf ] && run "$f" cat /etc/ipa/default.conf
   run "$f" systemctl is-active sssd
@@ -86,9 +87,12 @@ paso_02_root() {
 
   # 2.1 Estado efectivo de SSH para root (considera Match y drop-ins).
   if have sshd; then
-    run "$f" bash -c 'sshd -T 2>&1 | grep -Ei "^(permitrootlogin|passwordauthentication|pubkeyauthentication|allowusers|allowgroups|denyusers|denygroups|authorizedkeysfile|authenticationmethods|permitemptypasswords|usepam)"'
+    run "$f" bash -c 'sshd -T 2>&1 | grep -Ei "^(permitrootlogin|passwordauthentication|pubkeyauthentication|allowusers|allowgroups|denyusers|denygroups|authorizedkeysfile|authorizedkeyscommand|authorizedkeyscommanduser|authorizedprincipalsfile|authorizedprincipalscommand|trustedusercakeys|authenticationmethods|permitemptypasswords|usepam)"'
     run "$f" sshd -T -C user=root,host=localhost,addr=127.0.0.1
-    run "$f" bash -c 'sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>&1 | grep -i "^permitrootlogin"'
+    for a in 127.0.0.1 10.0.0.1 192.168.1.1 203.0.113.1; do
+      run "$f" bash -c "echo addr=$a; sshd -T -C user=root,host=remoto,addr=$a 2>&1 | grep -iE '^(permitrootlogin|passwordauthentication|authenticationmethods)'"
+    done
+    run "$f" bash -c 'echo "Bloques Match (pueden cambiar el valor por origen/usuario):"; grep -RniE "^[[:space:]]*Match" /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>&1'
   else
     say "  sshd no está instalado: se omite el estado efectivo."
   fi
@@ -112,7 +116,8 @@ paso_02_root() {
 
   # 2.4 authorized_keys de root: huella y comentario (la llave pública no es secreta).
   local ak
-  for ak in /root/.ssh/authorized_keys /root/.ssh/authorized_keys2; do
+  local akf; akf="$(sshd -T 2>/dev/null | awk '$1=="authorizedkeysfile"{for(i=2;i<=NF;i++)print $i}' | sed "s|%h|/root|g;s|%u|root|g")"
+  for ak in /root/.ssh/authorized_keys /root/.ssh/authorized_keys2 $(printf "%s\n" "$akf" | grep "^/"); do
     [ -f "$ak" ] || continue
     run "$f" bash -c "stat -c '%n | ctime=%z | mtime=%y | %U %a' '$ak'; wc -l '$ak'; ssh-keygen -lf '$ak' 2>&1; grep -nE '^(command=|from=|no-)' '$ak' | cut -c1-120"
   done
@@ -121,8 +126,8 @@ paso_02_root() {
   # 2.5 Quién entró como root y cuándo.
   run "$f" bash -c 'last -F -n 50 root 2>&1'
   run "$f" bash -c 'lastlog -u root 2>&1'
-  run "$f" bash -c 'zgrep -hE "Accepted .* for root" /var/log/auth.log* /var/log/secure* 2>/dev/null | tail -n 100'
-  have journalctl && run "$f" bash -c 'journalctl --no-pager -q -u ssh -u sshd 2>&1 | grep -E "Accepted .* for root|Failed .* for root" | tail -n 100'
+  run "$f" bash -c 'zgrep -hE "Accepted .* for root from" /var/log/auth.log* /var/log/secure* 2>/dev/null | tail -n 100'
+  have journalctl && run "$f" bash -c 'journalctl --no-pager -q -u ssh -u sshd 2>&1 | grep -E "Accepted .* for root from|Failed .* for root from" | tail -n 100'
   have journalctl && run "$f" bash -c 'journalctl --no-pager -q --disk-usage 2>&1; journalctl --no-pager -q 2>&1 | head -n 2'
 
   # 2.6 Quién modificó (rastros). Cada fuente se guarda aparte para citarla.
@@ -130,7 +135,7 @@ paso_02_root() {
   run "$f" bash -c "zgrep -hE 'COMMAND=.*($pat)' /var/log/auth.log* /var/log/secure* 2>/dev/null | tail -n 200"
   have journalctl && run "$f" bash -c "journalctl --no-pager -q _COMM=sudo 2>&1 | grep -E '$pat' | tail -n 200"
   # Historiales de shell (evidencia débil: editable por el dueño).
-  run "$f" bash -c "for h in /root/.bash_history /home/*/.bash_history /root/.zsh_history /home/*/.zsh_history; do [ -f \"\$h\" ] && { echo \"== \$h\"; grep -nE '$pat' \"\$h\" | tail -n 50; }; done 2>&1"
+  run "$f" bash -c "for h in /root/.bash_history /home/*/.bash_history /root/.zsh_history /home/*/.zsh_history; do [ -f \"\$h\" ] && { echo \"== \$h\"; grep -noE '$pat' \"\$h\" | tail -n 50; }; done 2>&1"
   # auditd: la única fuente que atribuye por UID real (auid).
   if have ausearch; then
     run "$f" bash -c 'auditctl -l 2>&1'
@@ -142,8 +147,8 @@ paso_02_root() {
   fi
 
   # 2.7 FreeIPA: root/sudo pueden venir del dominio, no del host.
-  if grep -q '^FREEIPA=si' "$EVID/.freeipa" 2>/dev/null; then
-    run "$f" bash -c 'grep -vE "^[[:space:]]*(#|$)" /etc/sssd/sssd.conf 2>&1 | grep -viE "password|secret"'
+  if [ -f /etc/ipa/default.conf ] || grep -qs 'id_provider *= *ipa' /etc/sssd/sssd.conf; then
+    run "$f" bash -c 'grep -vE "^[[:space:]]*(#|$)" /etc/sssd/sssd.conf 2>&1 | grep -viE "password|secret|authtok"'
     run "$f" bash -c 'sudo -l -U root 2>&1 | head -n 40'
     printf 'MANUAL(FreeIPA): en el servidor IPA con ticket admin: ipa hbacrule-find; ipa sudorule-find; ipa user-show root --all\n' >>"$f"
   fi
@@ -154,10 +159,20 @@ paso_02_root() {
     printf 'permitrootlogin efectivo (root@localhost): '
     sshd -T -C user=root,host=localhost,addr=127.0.0.1 2>/dev/null | grep -i '^permitrootlogin' || echo 'no determinado'
     printf 'UID 0: '; awk -F: '$3==0{printf "%s ",$1}' /etc/passwd; echo
-    printf 'auditd: '; { have ausearch && echo si; } || echo no
+    local aud=no
+    if have auditctl && auditctl -l 2>/dev/null | grep -qE 'sshd_config|authorized_keys|/etc/passwd|/etc/sudoers'; then aud="si, con reglas sobre archivos relevantes"
+    elif have auditctl; then aud="instalado SIN reglas sobre sshd_config/authorized_keys/sudoers (no habrá atribución por auid)"; fi
+    printf 'auditd: %s\n' "$aud"
+    printf 'Match: %s bloque(s) en sshd_config*; el valor efectivo depende de usuario/origen (ver 02-root-acceso.txt, addr=...)\n' "$(grep -RiEc '^[[:space:]]*Match' /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null | awk -F: '{s+=$NF}END{print s+0}')"
+    printf 'Vías alternativas de llave: authorizedkeyscommand=%s trustedusercakeys=%s\n' "$(sshd -T 2>/dev/null | awk '$1=="authorizedkeyscommand"{print $2}')" "$(sshd -T 2>/dev/null | awk '$1=="trustedusercakeys"{print $2}')"
     printf 'Archivos clave por ctime (más reciente al final):\n'
     stat -c '  %z  %n' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/* /root/.ssh/authorized_keys /etc/sudoers /etc/sudoers.d/* 2>/dev/null | sort
     printf 'Detalle completo en: %s\n' "$f"
+    printf '\n== QUIÉN habilitó root ==\n'
+    case "$aud" in
+      si*) printf 'Hay auditd con reglas: buscar en 02-root-acceso.txt las líneas ausearch (auid = usuario real). Atribución posible, no automática.\n' ;;
+      *) printf 'INDETERMINADO por fuentes del host: sin auditd con reglas no hay atribución fiable. Pistas débiles: ctime de archivos (CUÁNDO, no QUIÉN), sudo en auth.log/journal (solo si no se usó una shell previa: sudo -i / su registran la shell, no lo hecho dentro), historiales (editables). Con FreeIPA/LDAP revisar además el servidor.\n' ;;
+    esac
   } >"$r"
   ESTADO[2]="ok"
   say "Paso 2 listo → $f"; cat "$r"
@@ -256,7 +271,7 @@ paso_04_sudo() {
   run "$f" bash -c 'awk -F: "(\$2==\"\" ){print \"SIN PASSWORD: \" \$1}" /etc/shadow 2>&1'
   run "$f" bash -c 'awk -F: "\$3==0{print \"UID0: \" \$1}" /etc/passwd; cut -d: -f3 /etc/passwd | sort | uniq -d | sed "s/^/UID duplicado: /"'
   run "$f" bash -c 'awk -F: "\$3>=1000 && \$7!~/nologin|false/ {print \$1\":\"\$3\":\"\$7}" /etc/passwd'
-  run "$f" bash -c 'awk -F: "{print \$1\" \"\$2\" lastchg=\"\$3\" max=\"\$5}" /etc/shadow 2>&1 | grep -vE " (\*|!|!!|!\*) "'
+  run "$f" bash -c 'awk -F: "{if(\$2!~/^(\*|!|!!|!\*)\$/) print \$1\" lastchg=\"\$3\" max=\"\$5}" /etc/shadow 2>&1'
   run "$f" bash -c 'grep -RE "^[^#]*(NOPASSWD)" /etc/sudoers /etc/sudoers.d 2>&1 | cut -d: -f1 | sort -u'
 
   # Evaluación mecánica
