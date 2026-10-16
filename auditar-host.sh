@@ -2,7 +2,7 @@
 # auditar-host.sh — lanzador: audita un host remoto con auditoria-root-acceso.sh en un solo comando.
 # Uso: ./auditar-host.sh [-d DIR] [-e DESTINO] [usuario@]host-o-ip
 #   -d DIR      carpeta local donde dejar el paquete (por defecto, la carpeta actual)
-#   -e DESTINO  además, envía el paquete por scp a DESTINO (usuario@servidor:ruta)
+#   -e DESTINO  envía el paquete por scp a DESTINO (usuario@servidor:ruta); si no lo das, te pregunta
 # Corre en TU equipo, no en el host. Copia el script y vendor/, lo ejecuta por SSH con el
 # sudo de TU usuario (te pedirá su contraseña), trae el .tar.gz, verifica el SHA256 y
 # comprueba que los 8 pasos se ejecutaron. No guarda contraseñas ni llaves.
@@ -38,11 +38,10 @@ case "$TARGET" in
 esac
 printf '%s' "$TARGET" | grep -Eq '^[A-Za-z0-9._@-]+$' || die "destino inválido: $TARGET (usa usuario@host o IP)"
 
+# usuario@servidor:ruta — sin espacios ni metacaracteres: la ruta se usa en un comando remoto
+destino_valido() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._@][A-Za-z0-9._@-]*:[A-Za-z0-9._/~-]*$'; }
 if [ -n "$EDEST" ]; then
-  # usuario@servidor:ruta — sin espacios ni metacaracteres: la ruta se usa en un comando remoto
-  printf '%s' "$EDEST" | grep -Eq '^[A-Za-z0-9._@][A-Za-z0-9._@-]*:[A-Za-z0-9._/~-]*$' \
-    || die "destino -e inválido: $EDEST (usa usuario@servidor:ruta)"
-  EHOST="${EDEST%%:*}"; EPATH="${EDEST#*:}"
+  destino_valido "$EDEST" || die "destino -e inválido: $EDEST (usa usuario@servidor:ruta)"
 fi
 
 for c in ssh scp sha256sum tar mktemp; do
@@ -95,7 +94,18 @@ tar -xzOf "$DEST/$NAME" --wildcards '*/01-preflight.txt' 2>/dev/null \
   | grep -E '^(FREEIPA|ZABBIX_AGENT|GLPI_AGENT)=|^POLITICA_FIBEX' | sed 's/^/  /'
 
 ENTREGADO=1
+if [ "$RESULTADO" = "OK" ] && [ -z "$EDEST" ]; then
+  # sin -e: pregunta a dónde enviarlo (Enter = no enviar; sin terminal o stdin vacío = no enviar)
+  for _ in 1 2 3; do
+    printf "¿A dónde enviar el paquete? usuario@servidor:ruta (Enter = no enviar): "
+    read -r r || { r=""; printf "\n"; }
+    [ -z "$r" ] && break
+    if destino_valido "$r"; then EDEST="$r"; break; fi
+    printf 'Destino inválido: usa usuario@servidor:ruta, o Enter para no enviar.\n'
+  done
+fi
 if [ "$RESULTADO" = "OK" ] && [ -n "$EDEST" ]; then
+  EHOST="${EDEST%%:*}"; EPATH="${EDEST#*:}"
   paso "extra" "Enviando el paquete a $EDEST"
   if scp -q "$DEST/$NAME" "$DEST/$NAME.sha256" "$EDEST/" \
      && ssh "$EHOST" "cd ${EPATH:-.} && sha256sum -c $NAME.sha256"; then

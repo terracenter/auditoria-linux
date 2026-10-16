@@ -81,6 +81,18 @@ check "limpieza: conserva archivos ajenos en ~/auditoria" "[ $rc -eq 0 ] && [ -f
 rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza "" "$LANZ" -d "$T/dest" -e entrega@srv:entrega u@10.0.0.9 </dev/null; rc=$?
 check "-e: exit 0, llega al destino y limpia el host" "[ $rc -eq 0 ] && ls '$T/home/entrega'/auditoria-root-*.tar.gz >/dev/null 2>&1 && [ ! -d '$T/home/auditoria' ] && grep -q 'Entregado y verificado' '$T/out'"
 
+# 3b. sin -e: pregunta a dónde enviar
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza 'entrega@srv:entrega' "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
+check "pregunta: destino válido entrega y limpia" "[ $rc -eq 0 ] && grep -q 'A dónde enviar' '$T/out' && ls '$T/home/entrega'/auditoria-root-*.tar.gz >/dev/null 2>&1 && [ ! -d '$T/home/auditoria' ]"
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza '' "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
+check "pregunta: Enter no envía, y limpia el host" "[ $rc -eq 0 ] && [ \"\$(grep -c 'A dónde enviar' '$T/out')\" = 1 ] && [ ! -d '$T/home/entrega' ] && [ ! -d '$T/home/auditoria' ] && ! grep -q 'entrega@' '$T/log'"
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza $'a b;rm\nentrega@srv:entrega' "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
+check "pregunta: inválido y reintento válido entrega" "[ $rc -eq 0 ] && grep -q 'Destino inválido' '$T/out' && ls '$T/home/entrega'/auditoria-root-*.tar.gz >/dev/null 2>&1"
+rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza 'entrega@srv:entrega' env FAKE_E_FAIL=1 "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
+check "pregunta: envío falla, FALLO y host intacto" "[ $rc -eq 1 ] && grep -q 'RESULTADO: FALLO' '$T/out' && [ -d '$T/home/auditoria/vendor' ]"
+rm -f "$T/dest/"*; lanza 'entrega@srv:entrega' env STUB_FALTAN=7 "$LANZ" -d "$T/dest" u@10.0.0.9; rc=$?
+check "pregunta: con FALLO previo no pregunta" "[ $rc -eq 1 ] && ! grep -q 'A dónde enviar' '$T/out'"
+
 # 4. -e falla al enviar: FALLO, exit 1, el host NO se limpia
 rm -f "$T/dest/"*; rm -rf "$T/home/entrega"; lanza "" env FAKE_E_FAIL=1 "$LANZ" -d "$T/dest" -e entrega@srv:entrega u@10.0.0.9 </dev/null; rc=$?
 check "-e falla: exit 1, RESULTADO FALLO y host intacto" "[ $rc -eq 1 ] && grep -q 'RESULTADO: FALLO' '$T/out' && [ -d '$T/home/auditoria/vendor' ]"
