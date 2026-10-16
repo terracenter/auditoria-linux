@@ -215,7 +215,7 @@ paso_03_ssh() {
     "clientalivecountmax|le|3"
     "banner|ne|none"
     "ciphers|nocontain|3des|cbc|arcfour|rc4|blowfish|cast128"
-    "macs|nocontain|md5|sha1-|umac-64|96"
+    "macs|nocontain|md5|sha1-|hmac-sha1$|hmac-sha1,|umac-64|96"
     "kexalgorithms|nocontain|group1-|group14-sha1|group-exchange-sha1"
   )
   local fail=0 total=0 line d rule val act ok pats
@@ -225,7 +225,7 @@ paso_03_ssh() {
   } >"$r"
   for line in "${rules[@]}"; do
     IFS='|' read -r d rule val pats <<<"$line"
-    act="$(awk -v k="$d" '$1==k{$1="";sub(/^ /,"");print;exit}' "$cfg" 2>/dev/null)"
+    act="$(awk -v k="$d" '$1==k{$1="";sub(/^ /,"");print;exit}' "$cfg" 2>/dev/null)"; act="${act,,}"
     ok="FAIL"; total=$((total+1))
     if [ -z "$act" ]; then ok="NODET"
     else
@@ -281,23 +281,29 @@ paso_04_sudo() {
   if [ ! -r /etc/sudoers ]; then
     chk "sudoers legible (ejecutar como root)" NODET "sin lectura: controles sudo no evaluados"
   elif have sudo; then
-    printf '%s' "$sd" | grep -qE '^[[:space:]]*Defaults[[:space:]].*use_pty' && chk "sudo use_pty" OK "" || chk "sudo use_pty" FAIL "falta Defaults use_pty"
-    printf '%s' "$sd" | grep -qE '^[[:space:]]*Defaults[[:space:]].*logfile' && chk "sudo logfile" OK "" || chk "sudo logfile" FAIL "falta Defaults logfile (CIS 5.2.3)"
+    defon() { printf '%s\n' "$sd" | grep -E "^[[:space:]]*Defaults[^#]*(^|[[:space:],])$1([[:space:],=]|$)" | grep -vE "![[:space:]]*$1" | grep -q .; }
+    defon use_pty && chk "sudo use_pty" OK "" || chk "sudo use_pty" FAIL "falta Defaults use_pty (o está negado con !)"
+    defon logfile && chk "sudo logfile" OK "" || chk "sudo logfile" FAIL "falta Defaults logfile (CIS 5.2.3) o está negado"
     printf '%s' "$sd" | grep -qE 'NOPASSWD|!authenticate' && chk "sudo sin NOPASSWD/!authenticate" FAIL "$(printf '%s' "$sd" | grep -cE 'NOPASSWD|!authenticate') regla(s)" || chk "sudo sin NOPASSWD/!authenticate" OK ""
     printf '%s' "$sd" | grep -qE 'timestamp_timeout[[:space:]]*=[[:space:]]*(-1|[6-9]|[1-9][0-9])' && chk "sudo timestamp_timeout <=5" FAIL "" || chk "sudo timestamp_timeout <=5" OK "(defecto 5 o menor)"
   else
     chk "sudo instalado" NODET "sudo no instalado"
   fi
-  grep -qE '^[^#]*pam_wheel\.so.*(use_uid)' /etc/pam.d/su 2>/dev/null && chk "su restringido (pam_wheel use_uid)" OK "" || chk "su restringido (pam_wheel use_uid)" FAIL "/etc/pam.d/su sin pam_wheel activo"
+  grep -E '^[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so' /etc/pam.d/su 2>/dev/null | grep -q 'use_uid' && ! grep -E '^[[:space:]]*auth[[:space:]]+(sufficient|required)[[:space:]]+pam_wheel\.so.*trust' /etc/pam.d/su 2>/dev/null | grep -q . \
+    && chk "su restringido (auth required pam_wheel use_uid)" OK "" || chk "su restringido (auth required pam_wheel use_uid)" FAIL "pam_wheel ausente, no required, sin use_uid o con trust"
   local rp; rp="$(passwd -S root 2>/dev/null | awk '{print $2}')"
   [ -n "$rp" ] && chk "estado password de root" OK "passwd -S: $rp (L=bloqueada, P=activa; decisión de política)" || chk "estado password de root" NODET ""
   [ "$(awk -F: '$3==0{c++}END{print c+0}' /etc/passwd)" = 1 ] && chk "único UID 0" OK "" || chk "único UID 0" FAIL "$(awk -F: '$3==0{printf "%s ",$1}' /etc/passwd)"
   [ -z "$(awk -F: '$2==""{print $1}' /etc/shadow 2>/dev/null)" ] && chk "sin cuentas con password vacío" OK "" || chk "sin cuentas con password vacío" FAIL "$(awk -F: '$2==""{printf "%s ",$1}' /etc/shadow 2>/dev/null)"
-  [ "$(stat -c %a /etc/shadow 2>/dev/null)" -le 640 ] 2>/dev/null && chk "permisos /etc/shadow <=640" OK "" || chk "permisos /etc/shadow <=640" FAIL "$(stat -c %a /etc/shadow 2>/dev/null)"
+  local sp so; sp="$(stat -c %a /etc/shadow 2>/dev/null)"; so="$(stat -c %U:%G /etc/shadow 2>/dev/null)"
+  [ -n "$sp" ] && [ "$((8#$sp))" -le "$((8#640))" ] && [ "${so%%:*}" = root ] && chk "/etc/shadow <=640 y dueño root" OK "$sp $so" || chk "/etc/shadow <=640 y dueño root" FAIL "${sp:-?} ${so:-?}"
   local pm; pm="$(awk '$1=="PASS_MAX_DAYS"{print $2}' /etc/login.defs 2>/dev/null)"
   [ -n "$pm" ] && [ "$pm" -le 365 ] 2>/dev/null && chk "PASS_MAX_DAYS <=365" OK "$pm" || chk "PASS_MAX_DAYS <=365" FAIL "${pm:-no definido}"
-  { grep -qE '^[^#]*pam_(faillock|tally2)' /etc/pam.d/* 2>/dev/null || [ -s /etc/security/faillock.conf ]; } && chk "bloqueo por intentos (faillock)" OK "" || chk "bloqueo por intentos (faillock)" FAIL "no configurado"
-  grep -rqE '^[[:space:]]*minlen' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null && chk "pwquality minlen" OK "" || chk "pwquality minlen" FAIL "no definido"
+  { grep -qE '^[^#]*pam_faillock\.so' /etc/pam.d/* 2>/dev/null || grep -qE '^[^#]*pam_tally2\.so' /etc/pam.d/* 2>/dev/null; } \
+    && grep -qE '^[[:space:]]*deny[[:space:]]*=' /etc/security/faillock.conf 2>/dev/null && chk "bloqueo por intentos (faillock en PAM + deny)" OK "" \
+    || chk "bloqueo por intentos (faillock en PAM + deny)" FAIL "pam_faillock no está en la pila PAM o falta deny= activo (faillock.conf solo con comentarios no cuenta)"
+  local ml; ml="$(grep -rhE '^[[:space:]]*minlen[[:space:]]*=' /etc/security/pwquality.conf /etc/security/pwquality.conf.d 2>/dev/null | tail -n 1 | tr -dc 0-9)"
+  grep -qE '^[^#]*pam_pwquality\.so' /etc/pam.d/* 2>/dev/null && [ -n "$ml" ] && [ "$ml" -ge 14 ] && chk "pwquality en PAM, minlen >=14" OK "minlen=$ml" || chk "pwquality en PAM, minlen >=14" FAIL "minlen=${ml:-no definido}; pam_pwquality debe estar activo"
   printf 'Incumplen o sin determinar: %s de %s\nDetalle: %s\n' "$bad" "$n" "$f" >>"$r"
   ESTADO[4]="ok"
   say "Paso 4 listo → $f"; cat "$r"
@@ -317,7 +323,6 @@ paso_05_firewall() {
     have systemctl && printf '%s active=%s enabled=%s\n' "$e" \
       "$(systemctl is-active "$e" 2>&1)" "$(systemctl is-enabled "$e" 2>&1)" >>"$f"
   done
-  [ "$(id -u)" -ne 0 ] && chk "ejecutado como root" NODET "sin root no se leen reglas (nft/iptables)"
 
   # nftables
   if have nft; then
@@ -379,9 +384,9 @@ paso_05_firewall() {
 
   # Escucha no-loopback (cruce manual con reglas: exposición real)
   { printf '\n== Puertos en escucha NO loopback ==\n'
-    ss -H -tulnp 2>/dev/null | awk '$5!~/^(127\.|\[::1\]|::1)/{print $1, $5, $7}'
+    ss -tulnp 2>/dev/null | tail -n +2 | awk '$5!~/^(127\.|\[::1\]|::1)/{print $1, $5, $7}'
   } >>"$f"
-  ss -H -tulnp 2>/dev/null | awk '$5!~/^(127\.|\[::1\]|::1)/{print $1, $5, $7}' | sed 's/^/  expuesto: /' >>"$r"
+  ss -tulnp 2>/dev/null | tail -n +2 | awk '$5!~/^(127\.|\[::1\]|::1)/{print $1, $5, $7}' | sed 's/^/  expuesto: /' >>"$r"
   printf 'Incumplen o sin determinar: %s de %s\nDetalle: %s\n' "$bad" "$n" "$f" >>"$r"
   ESTADO[5]="ok"
   say "Paso 5 listo → $f"; cat "$r"
@@ -403,7 +408,6 @@ paso_06_fail2ban() {
   have systemctl && run "$f" systemctl status fail2ban --no-pager
   run "$f" fail2ban-client version
   run "$f" fail2ban-client status
-  [ "$(id -u)" -ne 0 ] && chk "ejecutado como root" NODET "fail2ban-client requiere root"
   local act; act="$(systemctl is-active fail2ban 2>&1)"
   [ "$act" = active ] && chk "servicio fail2ban activo" OK "" || chk "servicio fail2ban activo" FAIL "is-active=$act"
   have systemctl && [ "$(systemctl is-enabled fail2ban 2>&1)" = enabled ] \
@@ -427,7 +431,7 @@ paso_06_fail2ban() {
 
   # Cruce servicio en escucha -> jaula esperada (proceso:jaulas aceptables)
   local procs map p want hit
-  procs="$(ss -H -tlnp 2>/dev/null | awk '$4!~/^(127\.|\[::1\])/' | grep -o '(("[^"]*"' | tr -d '("' | sort -u)"
+  procs="$(ss -tlnp 2>/dev/null | tail -n +2 | awk '$4!~/^(127\.|\[::1\])/' | grep -o '(("[^"]*"' | tr -d '("' | sort -u)"
   printf '\n== Servicios en escucha (no loopback) y jaula esperada ==\n' >>"$f"
   map='sshd:sshd nginx:nginx-http-auth|nginx-botsearch|nginx-limit-req apache2:apache-auth|apache-badbots httpd:apache-auth|apache-badbots postfix:postfix|postfix-sasl master:postfix|postfix-sasl dovecot:dovecot vsftpd:vsftpd proftpd:proftpd pure-ftpd:pure-ftpd mysqld:mysqld-auth mariadbd:mysqld-auth named:named-refused asterisk:asterisk pveproxy:proxmox exim4:exim'
   for p in $procs; do
