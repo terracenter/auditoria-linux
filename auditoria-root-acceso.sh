@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.6.0-paso6"
+VERSION="0.7.0-paso7"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -428,7 +428,76 @@ paso_06_fail2ban() {
   ESTADO[6]="ok"
   say "Paso 6 listo → $f"; cat "$r"
 }
-paso_07_lynis()    { pendiente 7 "Lynis (tarball vendorizado)"; }
+# --- paso 7: Lynis (tarball vendorizado, no se instala) -----------------------
+# Busca vendor/lynis junto al script. Verifica SHA256 (y GPG si hay gpg, con
+# keyring aislado en la evidencia), extrae en la carpeta de evidencia y corre
+# la auditoría. Obsolescencia: se evalúa el SO (EOL) y la edad del Lynis.
+paso_07_lynis() {
+  local f="$EVID/07-lynis.txt" r="$EVID/07-resumen.txt"; : >"$f"
+  local n=0 bad=0
+  chk() { n=$((n+1)); [ "$2" = "OK" ] || bad=$((bad+1)); printf '%-44s %-8s %s\n' "$1" "$2" "$3" >>"$r"; }
+  printf '== Lynis (%s) ==\n%-44s %-8s %s\n' "$HOST" CONTROL ESTADO DETALLE >"$r"
+  local here v tb
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; v="$here/vendor/lynis"
+  tb="$(ls "$v"/lynis-*.tar.gz 2>/dev/null | head -1)"
+  if [ -z "$tb" ]; then
+    chk "tarball vendorizado presente" FAIL "falta $v/lynis-*.tar.gz: copiar vendor/lynis/ junto al script (o instalar Lynis oficial y validar versión)"
+    ESTADO[7]="ok"; say "Paso 7: sin Lynis → $r"; cat "$r"; return
+  fi
+  chk "tarball vendorizado presente" OK "$(basename "$tb")"
+
+  # Integridad
+  if ( cd "$v" && sha256sum -c SHA256SUMS >>"$f" 2>&1 ); then chk "SHA256 del tarball" OK ""
+  else chk "SHA256 del tarball" FAIL "no coincide con SHA256SUMS: NO se ejecuta"; ESTADO[7]="ok"; say "Paso 7: integridad fallida"; cat "$r"; return; fi
+  # Firma GPG (keyring aislado; no toca el del host)
+  if have gpg && [ -f "$tb.asc" ] && [ -f "$v/cisofy-software.pub" ]; then
+    local gh="$EVID/.gnupg"; mkdir -p "$gh" && chmod 700 "$gh"
+    GNUPGHOME="$gh" gpg --batch --quiet --import "$v/cisofy-software.pub" >>"$f" 2>&1
+    if GNUPGHOME="$gh" gpg --batch --verify "$tb.asc" "$tb" >>"$f" 2>&1; then
+      chk "firma GPG del tarball" OK "huella: ver README [D] pendiente de confirmar con CISOfy"
+    else chk "firma GPG del tarball" FAIL "firma inválida: NO se ejecuta"; ESTADO[7]="ok"; cat "$r"; return; fi
+  else chk "firma GPG del tarball" NODET "gpg ausente o falta .asc/.pub (solo SHA256 verificado)"; fi
+
+  # Extracción en la carpeta de evidencia (root, sin heredar dueños)
+  local d="$EVID/lynis-run"; mkdir -p "$d" && tar -xzf "$tb" -C "$d" --no-same-owner >>"$f" 2>&1 \
+    && chmod -R go-w "$d" || { chk "extracción" FAIL ""; ESTADO[7]="ok"; cat "$r"; return; }
+  local ly="$d/lynis"
+  [ -x "$ly/lynis" ] || { chk "extracción" FAIL "no existe $ly/lynis"; ESTADO[7]="ok"; cat "$r"; return; }
+
+  # Obsolescencia del SO
+  local id vid pretty; id="$(. /etc/os-release 2>/dev/null; echo "${ID:-?}")"
+  vid="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-?}")"
+  pretty="$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}")"
+  printf 'SO: %s (id=%s version=%s)\n' "$pretty" "$id" "$vid" >>"$f"
+  case "$id:$vid" in
+    centos:7*|rhel:7*|ol:7*) chk "SO soportado" FAIL "$pretty: fin de soporte (CentOS 7 EOL 2024-06-30); Lynis y paquetes pueden estar obsoletos" ;;
+    centos:6*|debian:9*|debian:10*|ubuntu:16*|ubuntu:18*) chk "SO soportado" FAIL "$pretty: sin soporte upstream" ;;
+    *) chk "SO soportado" NODET "$pretty: verificar fecha EOL en la distro [D]" ;;
+  esac
+  local bv; bv="$(bash --version | head -1)"; printf 'bash: %s\n' "$bv" >>"$f"
+
+  # Ejecución (solo lectura; logs y reporte en la evidencia)
+  local rep="$EVID/lynis-report.dat" lg="$EVID/lynis.log"
+  ( cd "$ly" && ./lynis audit system --no-colors --quiet --profile "$ly/default.prf" \
+      --logfile "$lg" --report-file "$rep" ) >"$EVID/07-lynis-stdout.txt" 2>&1
+  local rc=$?; printf 'lynis rc=%s\n' "$rc" >>"$f"
+  if [ ! -s "$rep" ]; then chk "ejecución de Lynis" FAIL "sin reporte (rc=$rc): ver 07-lynis-stdout.txt"
+  else
+    chk "ejecución de Lynis" OK "rc=$rc"
+    local ver hi nw ns
+    ver="$(sed -n 's/^lynis_version=//p' "$rep" | head -1)"
+    hi="$(sed -n 's/^hardening_index=//p' "$rep" | head -1)"
+    nw="$(grep -c '^warning\[\]=' "$rep")"; ns="$(grep -c '^suggestion\[\]=' "$rep")"
+    printf '%s' "$ver" | grep -q '^3\.1\.7' && chk "versión de Lynis ejecutada" OK "$ver" || chk "versión de Lynis ejecutada" FAIL "esperada 3.1.7, reporte: ${ver:-?}"
+    [ -n "$hi" ] && chk "hardening_index" OK "$hi/100 (referencia, no es CIS)" || chk "hardening_index" NODET ""
+    [ "$nw" -eq 0 ] && chk "warnings de Lynis" OK "0" || chk "warnings de Lynis" FAIL "$nw (ver abajo)"
+    chk "suggestions de Lynis" NODET "$ns (revisar lynis-report.dat)"
+    { printf '\n== Warnings ==\n'; sed -n 's/^warning\[\]=/  /p' "$rep"; } >>"$r"
+  fi
+  printf 'Incumplen o sin determinar: %s de %s\nDetalle: %s\n' "$bad" "$n" "$f" >>"$r"
+  ESTADO[7]="ok"
+  say "Paso 7 listo → $f"; cat "$r"
+}
 paso_08_empaquetar() {
   local tgz="$OUT_BASE/auditoria-root-${HOST}-${TS}.tar.gz"
   tar -C "$OUT_BASE" -czf "$tgz" "$(basename "$EVID")" || { say "Falló tar"; return 1; }
