@@ -7,7 +7,7 @@ set -u
 set -o pipefail
 PATH="$PATH:/usr/sbin:/sbin:/usr/local/sbin"
 
-VERSION="0.4.0-paso4"
+VERSION="0.5.0-paso5"
 OUT_BASE="$PWD"   # la evidencia queda en el directorio actual (sin /tmp)
 RUN_ALL=0
 
@@ -285,7 +285,90 @@ paso_04_sudo() {
   ESTADO[4]="ok"
   say "Paso 4 listo → $f"; cat "$r"
 }
-paso_05_firewall() { pendiente 5 "Firewall: política vs puertos"; }
+# --- paso 5: firewall --------------------------------------------------------
+# Solo lectura. Detecta motores activos, evalúa política por defecto (CIS 3.5)
+# y lista los puertos en escucha no-loopback para cruzarlos con las reglas.
+paso_05_firewall() {
+  local f="$EVID/05-firewall.txt" r="$EVID/05-resumen.txt"; : >"$f"
+  local n=0 bad=0 act=0 pol_ok=0
+  chk() { n=$((n+1)); [ "$2" = "OK" ] || bad=$((bad+1)); printf '%-44s %-8s %s\n' "$1" "$2" "$3" >>"$r"; }
+  printf '== CIS L2 firewall (%s) ==\n%-44s %-8s %s\n' "$HOST" CONTROL ESTADO DETALLE >"$r"
+
+  # Motores: instalado vs activo (no se asume nada por la sola presencia).
+  local e
+  for e in nftables ufw firewalld iptables netfilter-persistent pve-firewall; do
+    have systemctl && printf '%s active=%s enabled=%s\n' "$e" \
+      "$(systemctl is-active "$e" 2>&1)" "$(systemctl is-enabled "$e" 2>&1)" >>"$f"
+  done
+  [ "$(id -u)" -ne 0 ] && chk "ejecutado como root" NODET "sin root no se leen reglas (nft/iptables)"
+
+  # nftables
+  if have nft; then
+    run "$f" nft list ruleset
+    local nr; nr="$(nft list ruleset 2>/dev/null)"
+    if [ -n "$nr" ]; then
+      act=$((act+1))
+      printf '%s' "$nr" | grep -E 'hook input' | grep -q 'policy drop' \
+        && pol_ok=1 && chk "nft chain input policy drop" OK "" \
+        || { printf '%s' "$nr" | grep -qE 'hook input' \
+             && chk "nft chain input policy drop" FAIL "hook input sin policy drop (¿drop final en regla?: revisar 05-firewall.txt)" \
+             || chk "nft chain input policy drop" FAIL "sin cadena con hook input"; }
+    fi
+  fi
+  # iptables / ip6tables
+  local ipt
+  for ipt in iptables ip6tables; do
+    have "$ipt" || continue
+    run "$f" "$ipt" -S
+    local pr; pr="$("$ipt" -S 2>/dev/null | awk '$1=="-P"&&$2=="INPUT"{print $3}')"
+    if [ -n "$pr" ]; then
+      [ "$("$ipt" -S 2>/dev/null | grep -c '^-A')" -gt 0 ] || [ "$pr" = DROP ] && act=$((act+1))
+      [ "$pr" = DROP ] || [ "$pr" = REJECT ] \
+        && { pol_ok=1; chk "$ipt INPUT policy DROP" OK ""; } \
+        || chk "$ipt INPUT policy DROP" FAIL "policy=$pr (si hay DROP final por regla, validar a mano)"
+    fi
+  done
+  # ufw
+  if have ufw; then
+    run "$f" ufw status verbose
+    if ufw status 2>/dev/null | grep -q 'Status: active'; then
+      act=$((act+1))
+      ufw status verbose 2>/dev/null | grep -qE 'Default: (deny|reject) \(incoming\)' \
+        && { pol_ok=1; chk "ufw default deny incoming" OK ""; } || chk "ufw default deny incoming" FAIL ""
+    fi
+  fi
+  # firewalld
+  if have firewall-cmd; then
+    run "$f" firewall-cmd --state
+    run "$f" firewall-cmd --list-all-zones
+    if [ "$(firewall-cmd --state 2>/dev/null)" = running ]; then
+      act=$((act+1))
+      local z t; z="$(firewall-cmd --get-default-zone 2>/dev/null)"
+      t="$(firewall-cmd --permanent --zone="$z" --get-target 2>/dev/null)"
+      case "$t" in default|DROP|REJECT) pol_ok=1; chk "firewalld zona $z" OK "target=$t" ;; *) chk "firewalld zona $z" FAIL "target=$t" ;; esac
+    fi
+  fi
+  # Proxmox
+  if have pve-firewall; then
+    run "$f" pve-firewall status
+    run "$f" bash -c 'cat /etc/pve/firewall/cluster.fw /etc/pve/local/host.fw 2>&1'
+    pve-firewall status 2>/dev/null | grep -q 'Status: enabled' && act=$((act+1)) \
+      && { grep -qE 'policy_in: *(DROP|REJECT)' /etc/pve/firewall/cluster.fw 2>/dev/null && { pol_ok=1; chk "PVE policy_in DROP" OK ""; } || chk "PVE policy_in DROP" FAIL "cluster.fw sin policy_in DROP/REJECT"; }
+  fi
+
+  [ "$act" -ge 1 ] && chk "firewall activo (motores: $act)" OK "" || chk "firewall activo" FAIL "ningún motor con reglas/activo"
+  [ "$act" -gt 2 ] && chk "un solo motor gestionando" FAIL "$act motores activos: riesgo de conflicto"
+  [ "$pol_ok" -eq 1 ] || chk "política por defecto deny entrante" FAIL "ninguna política DROP/deny detectada"
+
+  # Escucha no-loopback (cruce manual con reglas: exposición real)
+  { printf '\n== Puertos en escucha NO loopback ==\n'
+    ss -H -tulnp 2>/dev/null | awk '$5!~/^(127\.|\[::1\]|::1)/{print $1, $5, $7}'
+  } >>"$f"
+  ss -H -tulnp 2>/dev/null | awk '$5!~/^(127\.|\[::1\]|::1)/{print $1, $5, $7}' | sed 's/^/  expuesto: /' >>"$r"
+  printf 'Incumplen o sin determinar: %s de %s\nDetalle: %s\n' "$bad" "$n" "$f" >>"$r"
+  ESTADO[5]="ok"
+  say "Paso 5 listo → $f"; cat "$r"
+}
 paso_06_fail2ban() { pendiente 6 "Fail2ban: jaulas vs servicios"; }
 paso_07_lynis()    { pendiente 7 "Lynis (tarball vendorizado)"; }
 paso_08_empaquetar() {
