@@ -16,7 +16,7 @@ SCRIPT="$AQUI/auditoria-root-acceso.sh"
 VENDOR="$AQUI/vendor"
 DEST="$PWD"
 
-uso() { sed -n '2,6p' "$0"; }
+uso() { sed -n '2,7p' "$0"; }
 die() { printf 'FALLO: %s\n' "$*" >&2; exit 1; }
 paso() { printf '\n[%s] %s\n' "$1" "$2"; }
 
