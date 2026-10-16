@@ -38,7 +38,7 @@ por defecto el directorio actual), `-h`.
 
 Necesitas: acceso SSH al host con un usuario con `sudo`, y el repo actualizado en tu equipo.
 
-1. **En tu equipo**, actualiza el repo: `git pull` dentro de `auditoria-linux`.
+1. **En tu equipo**, actualiza el repo: `cd ~/Workspace/Desarrollo/auditoria-linux && git pull` (es `Desarrollo/auditoria-linux`, no `Desarrollo/scripts`).
 2. **Copia al host** el script **y** la carpeta `vendor/` (sin `vendor/lynis/` el paso 7 falla):
 
    ```bash
