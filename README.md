@@ -114,7 +114,7 @@ Sin red ni host real (usan `ssh`, `scp`, `sudo` e `id` falsos que solo copian en
 Cada prueba se comprobó rompiendo a propósito el código y viendo que falla. No sustituyen la prueba en un host real.
 
 ### No validado todavía [D]
-- Análisis del primer paquete real (`pve-valencia-noc-viejo`, 2026-10-16): el lanzador 0.1.0 y los 8 pasos corrieron con SSH y root reales (según la salida de Freddy), pero el contenido del paquete aún no se ha revisado contra CIS L2. La limpieza automática del host de 0.2.0 sí se probó con SSH real (2026-10-16, según la salida de Freddy); la pregunta de envío y `-e` solo con ssh/scp falsos.
+- Análisis del primer paquete real (`pve-valencia-noc-viejo`, 2026-10-16): el lanzador 0.1.0 y los 8 pasos corrieron con SSH y root reales (según la salida de Freddy), pero el contenido del paquete aún no se ha revisado contra CIS L2. El lanzador 0.2.0 completo (prompt de destino, entrega por `scp` con verificación y limpieza automática del host) sí se probó con SSH real (2026-10-16, según la salida de Freddy). Las banderas rojas (script 0.11.0 / lanzador 0.3.0) y la opción `-e` dada por línea de comandos solo con comandos falsos.
 - La política de usuarios (BANDERA ROJA) solo se probó con comandos falsos; falta correrla con root real en `pve-valencia-noc-viejo`. La ortografía de `deudes` en la lista PAM la confirma Freddy.
 - CentOS 7 y Debian 12.
 - Huella de la llave de CISOfy contra la publicada por CISOfy.
